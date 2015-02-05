@@ -1,8 +1,9 @@
 "use strict";
 
 var pkg        = require("./../package.json"),
-    caching    = require("./lib/caching.js"),
+    resources  = require("./lib/resources.js"),
     cfg        = require("./lib/cfg.js"),
+    cookies    = require("./lib/cookies.js"),
     demo       = require("./lib/demo.js"),
     db         = require("./lib/db.js"),
     log        = require("./lib/log.js"),
@@ -65,7 +66,7 @@ var droppy = function droppy(options, isStandalone, callback) {
             function (cb) { if (isStandalone) { startListeners(cb); } else cb(); },
             function (cb) {
                 log.simple("Preparing resources ...");
-                caching.init(!config.debug, function (err, c) {
+                resources.init(!config.debug, function (err, c) {
                     if (err) return callback(err);
                     cache = c;
                     cb();
@@ -114,20 +115,11 @@ droppy._onRequest = onRequest;
 exports = module.exports = droppy;
 
 function printLogo() {
-    log.plain([
-            "....__..............................\n",
-            ".--|  |----.-----.-----.-----.--.--.\n",
-            "|  _  |   _|  _  |  _  |  _  |  |  |\n",
-            "|_____|__| |_____|   __|   __|___  |\n",
-            ".................|__|..|__|..|_____|\n",
-        ].join("").replace(/\./gm, chalk.black("."))
-                  .replace(/\_/gm, chalk.magenta("_"))
-                  .replace(/\-/gm, chalk.magenta("-"))
-                  .replace(/\|/gm, chalk.magenta("|"))
-    );
-    log.simple(chalk.blue(pkg.name), " ", chalk.green(pkg.version), " running on ",
-               chalk.blue(process.argv[0] || "node"), " ", chalk.green(process.version.substring(1)));
-    log.simple(chalk.blue("home"), " is at ", chalk.green(paths.home), "\n");
+    log.logo();
+    log.plain(" ", chalk.blue(pkg.name), " ", chalk.green(pkg.version),
+               " running on ", chalk.blue(process.argv[0] || "node"), " ",
+               chalk.green(process.version.substring(1)), "\n ",
+               chalk.blue("home"), " at ", chalk.green(paths.home), "\n");
 }
 
 function startListeners(callback) {
@@ -275,7 +267,7 @@ function setupSocket(server) {
     });
     wss.on("request", function (request) {
         var ws     = request.accept(),
-            cookie = getCookie(request.cookies);
+            cookie = cookies.get(request.cookies);
 
         if (!cookie && !config.public) {
             ws.close(4000);
@@ -679,11 +671,11 @@ function handleGET(req, res) {
 
     if (!utils.isPathSane(URI)) return log.info(req, res, "Invalid GET: " + req.url);
 
-    if (config.public && !getCookie(req.headers.cookie))
-        freeCookie(req, res);
+    if (config.public && !cookies.get(req.headers.cookie))
+        cookies.free(req, res);
 
     if (/^\/\?!\/content/.test(URI)) {
-        if (getCookie(req.headers.cookie) || config.public) {
+        if (cookies.get(req.headers.cookie) || config.public) {
             res.setHeader("X-Page-Type", "main");
             handleResourceRequest(req, res, "main.html");
         } else if (firstRun) {
@@ -719,7 +711,7 @@ function handlePOST(req, res) {
     if (!utils.isPathSane(URI)) return log.info(req, res, "Invalid POST: " + req.url);
 
     if (/\/upload/.test(URI)) {
-        if (!getCookie(req.headers.cookie)) {
+        if (!cookies.get(req.headers.cookie)) {
             res.statusCode = 401;
             res.end();
             log.info(req, res);
@@ -743,7 +735,7 @@ function handlePOST(req, res) {
         req.on("end", function () {
             var postData = qs.parse(body);
             if (db.authUser(postData.username, postData.password)) {
-                createCookie(req, res, postData);
+                cookies.create(req, res, postData);
                 endReq(req, res, true);
                 log.info(req, res, "User ", postData.username, chalk.green(" authenticated"));
             } else {
@@ -757,7 +749,7 @@ function handlePOST(req, res) {
             var postData = qs.parse(body);
             if (postData.username !== "" && postData.password !== "") {
                 db.addOrUpdateUser(postData.username, postData.password, true);
-                createCookie(req, res, postData);
+                cookies.create(req, res, postData);
                 firstRun = false;
                 endReq(req, res, true);
             } else {
@@ -822,7 +814,6 @@ function handleResourceRequest(req, res, resourceName) {
         } else {
             var headers = {}, status = 200;
 
-            // Caching
             if (req.url === "/" || /\?\!\/content/.test(req.url)) {
                 if (!config.debug)
                     headers["X-Frame-Options"] = "DENY";
@@ -881,7 +872,7 @@ function handleFileRequest(req, res, download) {
     }
 
     // Validate the cookie for the remaining requests
-    if (!getCookie(req.headers.cookie) && !shareLink) {
+    if (!cookies.get(req.headers.cookie) && !shareLink) {
         res.writeHead(301, {"Location": "/"});
         res.end();
         log.info(req, res);
@@ -966,7 +957,7 @@ function handleUploadRequest(req, res) {
     var busboy, opts,
         done     = false,
         files    = {},
-        cookie   = getCookie(req.headers.cookie);
+        cookie   = cookies.get(req.headers.cookie);
 
     req.query = qs.parse(req.url.substring("/upload?".length));
     log.info(req, res, "Upload started");
@@ -1074,11 +1065,15 @@ function handleUploadRequest(req, res) {
 
 //-----------------------------------------------------------------------------
 // Read a path, return type and info
-// @callback : function (error, info)
+// @callback : function (err, info)
 function readPath(root, callback) {
-    fs.stat(utils.addFilesPath(root), function (error, stats) {
-        if (error) {
-            callback(error);
+    fs.stat(utils.addFilesPath(root), function (err, stats) {
+        if (err) {
+            callback(null, {
+                type: "e",
+                size: 0,
+                mtime: 0
+            });
         } else if (stats.isFile()) {
             callback(null, {
                 type: "f",
@@ -1092,8 +1087,6 @@ function readPath(root, callback) {
                 size: 0,
                 mtime: stats.mtime.getTime() || 0
             });
-        } else {
-            callback(new Error("Path neither directory or file!"));
         }
     });
 }
@@ -1149,18 +1142,16 @@ function generateDirSizes(root, dirContents, callback) {
 // TODO: caching of results
 function du(dir, callback) {
     fs.stat(dir, function (error, stat) {
-        if (error) { return callback(error); }
-        if (!stat) return callback(null, 0);
+        if (error || !stat) return callback(null, 0);
         if (!stat.isDirectory()) return callback(null, stat.size);
-        fs.readdir(dir, function (error, list) {
-            if (error) return callback(error);
-            async.map(list.map(function (f) { return path.join(dir, f); }), function (f, callback) { return du(f, callback); },
-                function (error, sizes) {
-                    callback(error, sizes && sizes.reduce(function (p, s) {
-                        return p + s;
-                    }, stat.size));
-                }
-            );
+        fs.readdir(dir, function (error, files) {
+            if (error || !files || files.length === 0) return callback(null, 0);
+            files = files.map(function (file) { return path.join(dir, file); });
+            async.map(files, du, function (error, sizes) {
+                callback(error, sizes && sizes.reduce(function (p, s) {
+                    return p + s;
+                }, stat.size));
+            });
         });
     });
 }
@@ -1201,60 +1192,6 @@ function streamArchive(req, res, zipPath) {
 }
 
 //-----------------------------------------------------------------------------
-// Cookie functions
-function getCookie(cookie) {
-    var cookies = {};
-    if (Array.isArray(cookie) && cookie.length) {
-        cookies[cookie[0].name] = cookie[0].value;
-        return validate(cookies);
-    } else if (typeof cookie === "string" && cookie.length) {
-        cookie.split("; ").forEach(function(entry) {
-            var parts = entry.trim().split("=");
-            cookies[parts[0]] = parts[1];
-        });
-        return validate(cookies);
-    } else {
-        return false;
-    }
-}
-
-function validate(cookies) {
-    if (!cookies || !cookies.s) return false;
-    var found, sessions = db.get("sessions");
-    Object.keys(sessions).some(function(session) {
-        if (session === cookies.s) {
-            sessions[session].lastSeen = Date.now();
-            db.set("sessions", sessions);
-            found = session;
-            return true;
-        }
-    });
-    return found;
-}
-
-function freeCookie(req, res) {
-    var sessions  = db.get("sessions"),
-        sessionID = utils.getSid();
-
-    res.setHeader("Set-Cookie", "s=" + sessionID + ";expires=" + new Date(Date.now() + 31536000000).toUTCString() + ";path=/");
-    sessions[sessionID] = {privileged : true, lastSeen : Date.now()};
-    db.set("sessions", sessions);
-}
-
-function createCookie(req, res, postData) {
-    var sessions  = db.get("sessions"),
-        sessionID = utils.getSid();
-
-    if (postData.remember) // Create a semi-permanent cookie
-        res.setHeader("Set-Cookie", "s=" + sessionID + ";expires=" + new Date(Date.now() + 31536000000).toUTCString() + ";path=/");
-    else // Create a single-session cookie
-        res.setHeader("Set-Cookie", "s=" + sessionID + ";path=/");
-
-    sessions[sessionID] = {privileged : db.get("users")[postData.username].privileged, lastSeen : Date.now()};
-    db.set("sessions", sessions);
-}
-
-//-----------------------------------------------------------------------------
 // Hourly tasks
 setInterval(function hourly() {
     // Clean inactive sessions after 1 month of inactivity
@@ -1271,8 +1208,10 @@ setInterval(function hourly() {
 
 //-----------------------------------------------------------------------------
 // Update clients on file changes
-function watcherUpdate(dir) {
-    log.debug("Watcher detected update for ", chalk.blue(dir));
+function watcherUpdate(event, p) {
+    var dir = path.dirname(p);
+    dir = (dir === ".") ? "/" : "/" + dir;
+    log.debug("Watcher event: " + chalk.blue("'" + event + "'") + " in ", chalk.blue(dir));
     var clientsToUpdate = [];
     Object.keys(clients).forEach(function (cookie) {
         clients[cookie].views.forEach(function (view, vId) {
@@ -1303,7 +1242,7 @@ function updateCSS(event, filename, cb) {
         setTimeout(function () { // Short timeout in case Windows still has the file locked
             var css = "";
 
-            caching.files.css.forEach(function (file) {
+            resources.files.css.forEach(function (file) {
                 css += fs.readFileSync(path.join(paths.mod, file)).toString("utf8");
             });
 

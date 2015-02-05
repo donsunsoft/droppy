@@ -538,14 +538,14 @@
         });
 
         // Return submits the form
-        $("#pass").register("keyup", function (event) {
+        $("#pass").register("keydown", function (event) {
             if (event.keyCode === 13) {
                 form.submit();
             }
         });
 
         // Spacebar toggles the checkbox
-        $("#remember").register("keyup", function (event) {
+        $("#remember").register("keydown", function (event) {
             if (event.keyCode === 32)
                 checkbox.prop("checked", !checkbox.prop("checked"));
         });
@@ -596,7 +596,7 @@
                 }, 100);
             })
             // Bind escape for hiding modals
-            .register("keyup", function (event) {
+            .register("keydown", function (event) {
                 if (event.keyCode === 27)
                     $("#click-catcher").click();
             })
@@ -625,7 +625,7 @@
 
         var fileInput = $("#file");
         fileInput.register("change", function (event) {
-            var files, path, name, rootAdded,
+            var files, path, name,
                 view = getView(fileInput[0].targetView),
                 obj  = {};
 
@@ -636,15 +636,6 @@
                     path = files[i].webkitRelativePath;
                     name = files[i].name;
                     if (path) {
-                        if (!rootAdded) { // Add the root folder for preview purpose
-                            var split = path.split("/");
-                            if (split.length > 1) {
-                                obj[split[0]] = {};
-                                rootAdded = true;
-                            }
-                        } else {
-                            obj[path] = files[i];
-                        }
                         obj[path] = files[i];
                     } else {
                         obj[name] = files[i];
@@ -802,11 +793,6 @@
             for (var i = 0, len = data.length; i < len; i++) {
                 if (isOverLimit(view, data[i].size)) return;
                 numFiles++;
-                view[0].currentData[data[i].name] = {
-                    size : data[i].size,
-                    type : "nf",
-                    mtime : Date.now()
-                };
                 // Don't include Zero-Byte files as uploads will freeze in IE if we attempt to upload them
                 // https://github.com/silverwind/droppy/issues/10
                 if (data[i].size === 0) {
@@ -824,9 +810,6 @@
                     if (isOverLimit(view, data[entry].size)) return;
                     numFiles++;
                     formLength++;
-                    if (!addedDirs[name]) {
-                        view[0].currentData[name] = {size: data[entry].size, type: "nf", mtime: Date.now()};
-                    }
                     formData.append(entry, data[entry], encodeURIComponent(entry));
                 } else {
                     if (!addedDirs[name]) {
@@ -938,7 +921,6 @@
     }
 
     function uploadCancel(view) {
-        $(".uploading").remove(); // Remove preview elements
         uploadFinish(view);
         sendMessage(view[0].vId, "REQUEST_UPDATE", view[0].currentFolder);
     }
@@ -1021,7 +1003,7 @@
                 entry.addClass("invalid");
             else
                 entry.removeClass("invalid");
-        }).register("keyup", function (event) {
+        }).register("keydown", function (event) {
             if (event.keyCode === 27) stopEdit(view); // Escape Key
             if (event.keyCode === 13) submitEdit(view, false, callback); // Return Key
         }).register("focusout", function () {
@@ -1078,10 +1060,9 @@
         }
     }
 
-    // Update the page title and trim a path to its basename
+    // Update the page title
     function updateTitle(text) {
-        if (text === "") text = "/";
-        document.title = text + " - droppy";
+        document.title = text || "droppy";
     }
 
     // Listen for popstate events, which indicate the user navigated back
@@ -1320,6 +1301,7 @@
                 targetRow = target;
             else
                 targetRow = target.parents(".data-row");
+            if (targetRow.data("type") === "error") return;
             showEntryMenu(targetRow, event.clientX);
             event.preventDefault();
             event.stopPropagation();
@@ -1847,14 +1829,7 @@
         };
     };
     droppy.templates.fn.sortKeysByProperty = function (entries, by) {
-        var filenames = Object.keys(entries);
-        if (by === "type") { // Treat new files from uploads equally for sorting purpose
-            filenames.forEach(function (entry) {
-                if (entries[entry].type === "nf") entries[entry].type = "f";
-                if (entries[entry].type === "nd") entries[entry].type = "d";
-            });
-        }
-        return filenames.sort(droppy.templates.fn.compare2(entries, by));
+        return Object.keys(entries).sort(droppy.templates.fn.compare2(entries, by));
     };
 
     function closeDoc(view) {
@@ -2095,8 +2070,10 @@
             url: "?_" + entryId,
             dataType: "text"
         }).done(function (data) {
+            var filename = basename(entryId);
+            updateTitle(filename);
             loadTheme(droppy.get("theme"), function () {
-                loadCM(data, basename(entryId));
+                loadCM(data, filename);
             });
         }).fail(function () {
             closeDoc(view);
@@ -2158,7 +2135,7 @@
                         if (change.origin !== "setValue")
                             view.find(".path li:last-child").removeClass("saved save-failed").addClass("dirty");
                     });
-                    editor.on("keyup", function (cm, event) { // Keyboard shortcuts
+                    editor.on("keydown", function (cm, event) { // Keyboard shortcuts
                         if (event.keyCode === 83 && (event[droppy.detects.mac ? "metaKey" : "ctrlKey"])) { // CTRL-S / CMD-S
                             var view = getCMView(cm);
                             event.preventDefault();
@@ -2924,7 +2901,7 @@
         box.find("svg").replaceWith(droppy.svg.link);
         input
             .val(window.location.protocol + "//" + window.location.host + window.location.pathname + "?$/" +  link)
-            .register("keyup", function (event) {
+            .register("keydown", function (event) {
                 if (event.keyCode === 27 || event.keyCode === 13)
                     $("#click-catcher").click();
             });

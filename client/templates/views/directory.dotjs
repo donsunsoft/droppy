@@ -8,7 +8,7 @@ it = {
     sortAsc: Boolean // Ascending or descending
     entries: {
         filename: { // obj
-            type: String // type of entry = "f" | "nf" | "d" | "nd"
+            type: String // type of entry = "f" (file) | "d" (directory) | "e" (error, probably no permission)
             mtime: Number // Last modified in ms
             size: Number // Size in bytes
         }
@@ -24,7 +24,7 @@ it = {
         <span class="header-spacer"></span>
     </div>
 #}}
-{{##def.folderLink:
+{{##def.folder:
     <li class="data-row{{= temp.classes }}" data-type="folder" data-id="{{= temp.id }}" data-entryname="{{= temp.entryname }}">
         <span class="sprite sprite-folder">{{= temp.svgIcon }}</span>
         <a class="folder-link entry-link">{{= temp.entryname }}</a>
@@ -35,7 +35,7 @@ it = {
         <span class="entry-menu faux-button" title="Actions">{{= droppy.svg.menu }}</span>
     </li>
 #}}
-{{##def.fileLink:
+{{##def.file:
     <li class="data-row{{= temp.classes }}" data-type="file" data-id="{{= temp.id }}" data-entryname="{{= temp.entryname }}">
         <span class="sprite {{= temp.spriteClass}}">{{= temp.svgIcon }}</span>
         <a class="file-link entry-link" href="?~{{= temp.id }}" target="nope" download="{{= temp.entryname }}">{{= temp.entryname }}</a>
@@ -44,6 +44,12 @@ it = {
         <span class="sharelink faux-button" title="Share file download link">{{= droppy.svg.link }}</span>
         <a class="download faux-button" href="?~{{= temp.id }}" target="nope" download="{{= temp.entryname }}" title="Download File">{{= droppy.svg.download }}</a>
         <span class="entry-menu faux-button" title="Actions">{{= droppy.svg.menu }}</span>
+    </li>
+#}}
+{{##def.error:
+    <li class="data-row{{= temp.classes }}" data-type="error" data-id="{{= temp.id }}" data-entryname="{{= temp.entryname }}">
+        <span class="sprite {{= temp.spriteClass}}">{{= temp.svgIcon }}</span>
+        <a class="error-link">{{= temp.entryname }}</a>
     </li>
 #}}
 {{? Object.keys(it.entries).length === 0 }}
@@ -68,10 +74,7 @@ it = {
                     temp.id = folder + entryname;
                     temp.spriteClass = droppy.templates.fn.getSpriteClass(entryExt);
                     temp.entryname = it.isUpload ? decodeURIComponent(entryname) : entryname;
-                if (obj.type === "nd" || obj.type === "nf") {
-                    temp.classes = " uploading";
-                    temp.svgIcon = '<span class="icon-uploading">' + droppy.svg["up-arrow"] + '</span>';
-                } else if (Object.keys(droppy.audioTypes).indexOf(getExt(entryname)) !== -1) {
+                if (Object.keys(droppy.audioTypes).indexOf(getExt(entryname)) !== -1) {
                     temp.classes = " playable";
                     temp.svgIcon = '<span class="icon-play">' + droppy.svg.play + '</span>';
                 } else {
@@ -79,10 +82,12 @@ it = {
                     temp.svgIcon = "";
                 };
             }}
-            {{? obj.type === "f" || obj.type === "nf" }}
-                {{#def.fileLink}}
-            {{?? obj.type === "d" || obj.type === "nd" }}
-                {{#def.folderLink}}
+            {{? obj.type === "f" }}
+                {{#def.file}}
+            {{?? obj.type === "d" }}
+                {{#def.folder}}
+            {{?? obj.type === "e" }}
+                {{#def.error}}
             {{?}}
         {{~}}
     </ul>
