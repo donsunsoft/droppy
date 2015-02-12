@@ -95,20 +95,20 @@
     };
 
     // Class swapping helper
-    $.fn.replaceClass = function (match, replacement) {
-        var elem, classes, classMatch,
-            i = this.length - 1,
+    $.fn.replaceClass = function (search, replacement) {
+        var elem, classes, matches,
+            i = this.length,
             hasClass = false;
-        for (; i >= 0; i--) {
+        while(--i >= 0) {
             elem = this[i];
             if (typeof elem === "undefined") return false;
             classes = elem.className.split(" ").filter(function (className) {
-                if (className === match) return false;
+                if (className === search) return false;
                 if (className === replacement) hasClass = true;
 
-                classMatch = className.match(match);
+                matches = search instanceof RegExp ? search.exec(className) : className.match(search);
                 // filter out if the entire capture matches the entire className
-                if (classMatch) return classMatch[0] !== className || classMatch[0] === replacement;
+                if (matches) return matches[0] !== className || matches[0] === replacement;
                 else return true;
             });
             if (!hasClass) classes.push(replacement);
@@ -306,7 +306,7 @@
             initAuthPage(type === "firstrun");
             raf(function () {
                 oldPage.replaceClass("in", "out").end(function () {
-                    $("#center-box").replaceClass("out", "in"); // remove out class
+                    $("#login-box").replaceClass("out", "in"); // remove out class
                 });
                 if (type === "firstrun") {
                     $("#login-info").text("Hello! Choose your creditentials.");
@@ -420,8 +420,11 @@
                 else
                     uploadFinish(view);
                 break;
-            case "UPDATE_CSS":
-                reloadCSS(msg.css);
+            case "RELOAD":
+                if (msg.css) {
+                    $("#css").remove();
+                    $("<style id='css'></style>").text(msg.css).appendTo($("head"));
+                } else window.location.reload(true);
                 break;
             case "SHARELINK":
                 showLinkBox(getView(vId), msg.link);
@@ -524,52 +527,30 @@
 //  Authentication page
 // ============================================================================
     function initAuthPage(firstrun) {
-        var submit    = $("#submit"),
-            checkbox  = $("#remember-checkbox"),
-            form      = $("#form");
+        var form = $("#form");
 
-        // Auto-focus the user input on load
         $("#user").focus();
 
-        // Remove invalid class on user action
-        $(".login-input").register("click keydown", function () {
-            $("#login-info-box").removeClass("link error");
-            $("#login-info").text("droppy");
-        });
-
-        // Return submits the form
         $("#pass").register("keydown", function (event) {
-            if (event.keyCode === 13) {
-                form.submit();
-            }
+            if (event.keyCode === 13) form.submit();
         });
 
-        // Spacebar toggles the checkbox
-        $("#remember").register("keydown", function (event) {
-            if (event.keyCode === 32)
-                checkbox.prop("checked", !checkbox.prop("checked"));
-        });
-        // Catch clicks outside the label
-        $("#remember").register("click", function (event) {
-            if ($(event.target).attr("id") === "remember")
-                checkbox.prop("checked", !checkbox.prop("checked"));
+        $(".remember").register("click", function () {
+            $(".remember").toggleClass("checked");
+            $("[name=remember]").attr("value", $(".remember").hasClass("checked") ? "1" : "");
         });
 
-        submit.register("click", function () { form.submit(); });
-        form.register("submit", function () {
+        $(".submit").register("click", function () {
+            form.submit();
+        });
+
+        $("#form").register("submit", function () {
             $.post(getRootPath() + (firstrun ? "adduser" : "login"), form.serialize(), null, "json").always(function (xhr) {
                 if (xhr.status  === 202) {
                     window.location.reload(true);
                 } else if (xhr.status === 401) {
                     $("#login-info").text(firstrun ? "Please fill both fields." : "Wrong login!");
-                    if ($("#login-info-box").hasClass("error")) {
-                        $("#login-info").addClass("shake");
-                        setTimeout(function () {
-                            $("#login-info").removeClass("shake");
-                        }, 500);
-                    } else {
-                        $("#login-info-box").attr("class", "error");
-                    }
+                    $("#login-info-box").attr("class", "error");
                     if (!firstrun) $("#pass").val("").focus();
                 }
             });
@@ -622,6 +603,18 @@
                 }
             });
         });
+
+
+        if ("MutationObserver" in window) {
+            new MutationObserver(function(mutations) {
+                mutations.forEach(function(mutation) {
+                    if (mutation.attributeName === "class") {
+                        var action = $("#click-catcher").hasClass("in") ? "addClass" : "removeClass";
+                        $("#navigation, .path, .content-container, .audio-bar")[action]("blur");
+                    }
+                });
+            }).observe(document.querySelector("#click-catcher"), {attributes: true});
+        }
 
         var fileInput = $("#file");
         fileInput.register("change", function (event) {
@@ -838,11 +831,19 @@
         // Create the XHR2 and bind the progress events
         var xhr = new XMLHttpRequest();
         xhr.upload.addEventListener("progress", function (event) { uploadProgress(view, event); });
-        xhr.upload.addEventListener("load", function () { uploadDone(view); });
         xhr.upload.addEventListener("error", function (event) {
             if (event && event.message) console.info(event.message);
             showError(view, "An error occured during upload");
             uploadCancel(view);
+        });
+        xhr.addEventListener("readystatechange", function () {
+            if (xhr.readyState !== 4) return;
+            if (xhr.status === 200) {
+                uploadDone(view);
+            } else {
+                showError(view, "Server responded with HTTP " + xhr.status);
+                uploadCancel(view);
+            }
         });
 
         $(".upload-cancel").register("click", function () {
@@ -1771,13 +1772,10 @@
 
     function showEntryMenu(entry, x) {
         var menuTop, menuMaxTop,
-            type = entry.find(".sprite").attr("class"),
+            type = /sprite\-(\w+)/.exec(entry.find(".sprite").attr("class"))[1],
             button = entry.find(".entry-menu"),
             menu = $("#entry-menu"),
             emWidth = parseFloat($("#entry-menu").css("font-size")); // width of 1em
-
-        type = type.match(/sprite\-(\w+)/);
-        if (type) type = type[1];
 
         menu.attr("class", "in").data("target", entry).addClass("type-" + type);
         if (x)
@@ -1798,14 +1796,14 @@
     }
 
     function sortByHeader(view, header) {
-        view[0].sortBy = header[0].className.match(/header\-(\w+)/)[1];
+        view[0].sortBy = /header\-(\w+)/.exec(header[0].className)[1];
         view[0].sortAsc = header.hasClass("down");
         header.attr("class", "header-" + view[0].sortBy + " " + (view[0].sortAsc ? "up" : "down") + " active");
         header.siblings().removeClass("active up down");
         var sortedEntries = droppy.templates.fn.sortKeysByProperty(view[0].currentData, header.attr("data-sort"));
         if (view[0].sortAsc) sortedEntries = sortedEntries.reverse();
         for (var index = sortedEntries.length - 1; index >= 0; index--) {
-            view.find("[data-entryname='" + sortedEntries[index] + "']:first").css({
+            view.find("[data-name='" + sortedEntries[index] + "']:first").css({
                 "order": index,
                 "-ms-flex-order": String(index)
             }).attr("order", index);
@@ -2853,12 +2851,6 @@
             droppy.set("theme", theme);
             if (callback) callback();
         });
-    }
-
-    function reloadCSS(css) {
-        if (!droppy.debug) return;
-        $("#css").remove();
-        $("<style id='css'></style>").text(css).appendTo($("head"));
     }
 
     function showSpinner(view) {

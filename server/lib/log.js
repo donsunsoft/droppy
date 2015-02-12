@@ -108,10 +108,12 @@ log.error = function error(err) {
 };
 
 log.simple = function simple() {
+    if (opts && opts.logLevel < 2) return;
     log(null, null, 0, chalk.magenta("->> ") + Array.prototype.slice.call(arguments, 0).join(""));
 };
 
 log.plain = function plain() {
+    if (opts && opts.logLevel < 2) return;
     log(null, null, 0, Array.prototype.slice.call(arguments, 0).join(""));
 };
 
@@ -134,11 +136,11 @@ log.timestamp = function timestamp() {
 
 log.logo = function logo() {
     log.plain(chalk.blue([
-        "    __                              \n",
-        " --|  |---- ----- ----- ----- -- -- \n",
-        "|  _  |   _|  _  |  _  |  _  |  |  |\n",
-        "|_____|__| |_____|   __|   __|___  |\n",
-        "                 |__|  |__|  |_____|\n",
+        "     __                              \n",
+        "  --|  |---- ----- ----- ----- -- -- \n",
+        " |  _  |   _|  _  |  _  |  _  |  |  |\n",
+        " |_____|__| |_____|   __|   __|___  |\n",
+        "                  |__|  |__|  |_____|\n",
     ].join("")));
 };
 

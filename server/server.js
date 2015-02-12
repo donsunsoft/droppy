@@ -13,11 +13,12 @@ var pkg        = require("./../package.json"),
     utils      = require("./lib/utils.js"),
     watcher    = require("./lib/watcher.js");
 
-var ap         = require("autoprefixer-core"),
+var _          = require("lodash"),
     async      = require("async"),
     Busboy     = require("busboy"),
     chalk      = require("chalk"),
     cpr        = require("cpr"),
+    engine     = require("detect-engine"),
     fs         = require("graceful-fs"),
     mv         = require("mv"),
     Wss        = require("websocket").server,
@@ -27,17 +28,26 @@ var crypto     = require("crypto"),
     path       = require("path"),
     qs         = require("querystring");
 
-var cache      = {},
-    clients    = {},
-    dirs       = {},
-    config     = null,
-    firstRun   = null,
-    hasServer  = null,
-    ready      = false,
-    isDemo     = process.env.NODE_ENV === "droppydemo";
+var cache         = {},
+    clients       = {},
+    clientsPerDir = {},
+    dirs          = {},
+    config        = null,
+    firstRun      = null,
+    hasServer     = null,
+    ready         = false,
+    isDemo        = process.env.NODE_ENV === "droppydemo";
+
+var UPDATE_THROTTLE = 500;
 
 var droppy = function droppy(options, isStandalone, callback) {
-    if (isStandalone) printLogo();
+    if (isStandalone) {
+        log.logo();
+        log.plain(" ", chalk.blue(pkg.name), " ", chalk.green(pkg.version), " running on ",
+                chalk.blue(engine), " ", chalk.green(process.version.substring(1)), "\n ",
+                chalk.blue("home"), " at ", chalk.green(paths.home), "\n");
+    }
+
     setupProcess(isStandalone);
 
     async.series([
@@ -52,10 +62,10 @@ var droppy = function droppy(options, isStandalone, callback) {
                         callback(err);
                     }
                 }
-                config = conf; cb(err);
+                config = conf;
+                cb(err);
             });
         },
-        function (cb) { watcher.init(config.readInterval, watcherUpdate, cb); },
         function (cb) { db.init(cb); },
     ], function (err) {
         if (err) return callback(err);
@@ -74,8 +84,9 @@ var droppy = function droppy(options, isStandalone, callback) {
             },
             function (cb) { cleanupTemp(); cb(); },
             function (cb) { cleanupLinks(cb); },
-            function (cb) { if (isDemo) demo.init(function (err) { if (err) log.error(err); cb(); }); else cb(); },
-            function (cb) { if (config.debug) { watchCSS(); updateCSS(null, null, cb); } else cb(); }
+            function (cb) { if (isDemo) demo.init(function (err) { if (err) log.error(err); }); cb(); },
+            function (cb) { if (config.debug) watcher.watchResources(config.usePolling, clientUpdate); cb(); },
+            function (cb) { watcher.watchFiles(config.usePolling, filesUpdate); cb(); },
         ], function (err) {
             if (err) return callback(err);
             if (isDemo) setInterval(demo.init, 30 * 60 * 1000);
@@ -113,14 +124,6 @@ function onRequest(req, res, next) {
 
 droppy._onRequest = onRequest;
 exports = module.exports = droppy;
-
-function printLogo() {
-    log.logo();
-    log.plain(" ", chalk.blue(pkg.name), " ", chalk.green(pkg.version),
-               " running on ", chalk.blue(process.argv[0] || "node"), " ",
-               chalk.green(process.version.substring(1)), "\n ",
-               chalk.blue("home"), " at ", chalk.green(paths.home), "\n");
-}
 
 function startListeners(callback) {
     var listeners = config.listeners, sockets = [];
@@ -199,7 +202,7 @@ function startListeners(callback) {
 //-----------------------------------------------------------------------------
 // Create socket listener
 function createListener(handler, opts, callback) {
-    var server, tlsModule, sessions, http = require("http");
+    var server, tlsModule, http = require("http");
     if (opts.proto === "http") {
         callback(null, http.createServer(handler));
     } else {
@@ -243,7 +246,7 @@ function createListener(handler, opts, callback) {
             });
 
             // TLS session resumption
-            sessions = {};
+            var sessions = {};
             server.on("newSession", function (id, data) {
                 sessions[id] = data;
             });
@@ -263,31 +266,32 @@ function setupSocket(server) {
     var wss = new Wss({
         httpServer: server,
         keepAlive: config.keepAlive > 0,
-        keepaliveInterval: config.keepAlive
+        keepaliveInterval: config.keepAlive,
+        autoAcceptConnections: false
     });
     wss.on("request", function (request) {
-        var ws     = request.accept(),
-            cookie = cookies.get(request.cookies);
+        var ws, sid, cookie = cookies.get(request.cookies);
 
         if (!cookie && !config.public) {
-            ws.close(4000);
-            log.info(ws, null, "Unauthorized WebSocket connection closed.");
+            request.reject();
+            log.info(ws, null, "Unauthorized WebSocket connection rejected.");
             return;
         } else {
+            ws = request.accept();
             log.info(ws, null, "WebSocket [", chalk.green("connected"), "] ");
-            clients[cookie] = { views: [], ws: ws };
+            sid = utils.newSid();
+            clients[sid] = { views: [], cookie: cookie, ws: ws };
         }
 
         ws.on("message", function (message) {
             var msg = JSON.parse(message.utf8Data),
                 vId = msg.vId;
 
-            if (msg.type !== "SAVE_FILE") // Don't log these as they spam the file contents into the log
-                log.debug(ws, null, chalk.magenta("RECV "), message.utf8Data);
+            if (msg.type !== "SAVE_FILE") log.debug(ws, null, chalk.magenta("RECV "), message.utf8Data);
 
             switch (msg.type) {
             case "REQUEST_SETTINGS":
-                send(clients[cookie].ws, JSON.stringify({ type : "SETTINGS", vId : vId, settings: {
+                sendObj(sid, {type: "SETTINGS", vId: vId, settings: {
                     "debug"         : config.debug,
                     "demoMode"      : isDemo,
                     "public"        : config.public,
@@ -295,74 +299,57 @@ function setupSocket(server) {
                     "themes"        : Object.keys(cache.themes),
                     "modes"         : Object.keys(cache.modes),
                     "caseSensitive" : process.platform !== "win32"
-                }}));
+                }});
                 break;
             case "REQUEST_UPDATE":
                 if (!utils.isPathSane(msg.data)) return log.info(ws, null, "Invalid update request: " + msg.data);
-                if (!clients[cookie]) clients[cookie] = { views: [], ws: ws }; // This can happen when the server restarts
+                if (!clients[sid]) clients[sid] = { views: [], ws: ws }; // This can happen when the server restarts
                 readPath(msg.data, function (error, info) {
-                    if (error) {
-                        // Send client back to root when the requested path doesn't exist
+                    var clientDir, clientFile;
+                    if (error) { // Send client back to root when the requested path doesn't exist
+                        clientDir = "/";
+                        clientFile = null;
                         log.error(error);
                         log.info(ws, null, "Non-existing update request, sending client to / : " + msg.data);
-                        sendToRoot(cookie, vId);
+                        updateDirectory("/", function (sizes) {
+                            sendFiles(sid, vId, "UPDATE_DIRECTORY", sizes);
+                        });
                         return;
                     } else if (info.type === "f") {
-                        clients[cookie].views[vId] = { file: path.basename(msg.data), directory: path.dirname(msg.data) };
-                        send(clients[cookie].ws, JSON.stringify({
-                            type: "UPDATE_BE_FILE",
-                            file: clients[cookie].views[vId].file,
-                            folder: clients[cookie].views[vId].directory,
-                            isFile: true,
-                            vId: vId,
-                        }));
+                        clientDir = path.dirname(msg.data);
+                        clientFile = path.basename(msg.data);
+                        sendObj(sid, {type: "UPDATE_BE_FILE", file: clientFile, folder: clientDir, isFile: true, vId: vId});
                     } else {
-                        clients[cookie].views[vId] = { file: null, directory: msg.data };
-                        updateDirectory(clients[cookie].views[vId].directory, function (sizes) {
-                            sendFiles(cookie, vId, "UPDATE_DIRECTORY", sizes);
-                        });
-                        watcher.updateWatchers(clients[cookie].views[vId].directory, clients, function (success) {
-                            // Send client back to / in case the directory can't be read
-                            if (!success) sendToRoot(cookie, vId);
+                        clientDir = msg.data;
+                        clientFile = null;
+                        updateDirectory(clientDir, function (sizes) {
+                            sendFiles(sid, vId, "UPDATE_DIRECTORY", sizes);
                         });
                     }
-                    function sendToRoot(cookie, vId) {
-                        clients[cookie].views[vId] = { file: null, directory: "/" };
-                        updateDirectory("/", function (sizes) {
-                            sendFiles(cookie, vId, "UPDATE_DIRECTORY", sizes);
-                        });
-                        watcher.updateWatchers("/", clients);
-                    }
+                    clients[sid].views[vId] = { file: clientFile, directory: clientDir };
+                    if (!clientFile) updateClientsPerDir(clientDir, sid, vId);
                 });
                 break;
             case "DESTROY_VIEW":
-                clients[cookie].views[vId] = null;
-                watcher.checkWatchedDirs(clients);
+                clients[sid].views[vId] = null;
                 break;
             case "REQUEST_SHARELINK":
                 if (!utils.isPathSane(msg.data)) return log.info(ws, null, "Invalid share link request: " + msg.data);
-                var link,
-                    links = db.get("sharelinks");
+                var link, links = db.get("sharelinks");
 
                 // Check if we already have a link for that file
-                for (var l in links) {
-                    if (msg.data === links[l]) {
-                        sendLink(cookie, l, vId);
-                        return;
+                var hadLink = Object.keys(links).some(function (link) {
+                    if (msg.data === links[link]) {
+                        sendObj(sid, {type: "SHARELINK", vId: vId, link: link});
+                        return true;
                     }
-                }
+                });
+                if (hadLink) break;
 
-                // Get a pseudo-random n-character lowercase string. The characters
-                // "l", "1", "i", "o", "0" characters are skipped for easier communication of links.
-                var chars = "abcdefghjkmnpqrstuvwxyz23456789";
-                do {
-                    link = "";
-                    while (link.length < config.linkLength)
-                        link += chars.charAt(Math.floor(Math.random() * chars.length));
-                } while (links[link]); // In case the RNG generates an existing link, go again
-                log.info(ws, null, "shareLink created: " + link + " -> " + msg.data);
+                link = utils.getLink(links, config.linkLength);
+                log.info(ws, null, "Share link created: " + link + " -> " + msg.data);
+                sendObj(sid, {type: "SHARELINK", vId: vId, link: link});
                 links[link] = msg.data;
-                sendLink(cookie, link, vId);
                 db.set("sharelinks", links);
                 break;
             case "DELETE_FILE":
@@ -391,17 +378,16 @@ function setupSocket(server) {
                     if (error && error.code !== "ENOENT") {
                         log.error("Error saving " + msg.data.to);
                         log.error(error);
-                        send(clients[cookie].ws, JSON.stringify({ vId: vId, type: "ERROR", text: "Error saving " + msg.data.to + ": " + error}));
+                        sendObj(sid, {type: "ERROR", vId: vId, text: "Error saving " + msg.data.to + ": " + error});
                     } else {
                         fs.writeFile(msg.data.to, msg.data.value, function (error) {
                             if (error) {
                                 log.error("Error writing " + msg.data.to);
                                 log.error(error);
-                                sendSaveStatus(cookie, vId, 1); // Save failed
                             } else {
                                 delete cache.etags[msg.data.to];
-                                sendSaveStatus(cookie, vId, 0); // Save successful
                             }
+                            sendObj(sid, {type: "SAVE_STATUS", vId: vId, status : error ? 1 : 0});
                         });
                     }
                 });
@@ -411,7 +397,7 @@ function setupSocket(server) {
                 if (!utils.isPathSane(msg.data.to)) return log.info(ws, null, "Invalid clipboard destination: " + msg.data.to);
                 if (msg.data.to.indexOf(msg.data.from + "/") !== -1 && msg.data.to !== msg.data.from) {
                     log.error("Can't copy directory into itself");
-                    send(clients[cookie].ws, JSON.stringify({ vId: vId, type: "ERROR", text: "Can't copy directory into itself."}));
+                    sendObj(sid, {type: "ERROR", vId: vId, text: "Can't copy directory into itself."});
                     return;
                 }
 
@@ -449,7 +435,7 @@ function setupSocket(server) {
                 // Disallow whitespace-only and empty strings in renames
                 if (!utils.isPathSane(msg.data.new) || /^\s*$/.test(msg.data.to) || msg.data.to === "") {
                     log.info(ws, null, "Invalid rename request: " + msg.data.new);
-                    send(clients[cookie].ws, JSON.stringify({ type: "ERROR", text: "Invalid rename request"}));
+                    sendObj(sid, {type: "ERROR", text: "Invalid rename request"});
                     return;
                 }
                 fs.rename(utils.addFilesPath(msg.data.old), utils.addFilesPath(msg.data.new), function (error) {
@@ -458,21 +444,21 @@ function setupSocket(server) {
                 });
                 break;
             case "GET_USERS":
-                if (db.get("sessions")[cookie].privileged) {
-                    sendUsers(cookie);
+                if (db.get("sessions")[cookie] && db.get("sessions")[cookie].privileged) {
+                    sendUsers(sid);
                 } else {
                     // Send an empty user list so the client know not to display the management options
-                    send(clients[cookie].ws, JSON.stringify({ type : "USER_LIST", users : {} }));
+                    sendObj(sid, {type: "USER_LIST", users: {}});
                 }
                 break;
             case "UPDATE_USER":
                 var name = msg.data.name, pass = msg.data.pass;
-                if (!db.get("sessions")[cookie].privileged) return;
+                if (!db.get("sessions")[sid].privileged) return;
                 if (pass === "") {
                     if (!db.get("users")[name]) return;
                     db.delUser(msg.data.name, function () {
                         log.info(ws, null, "Deleted user: ", chalk.magenta(name));
-                        sendUsers(cookie);
+                        sendUsers(sid);
                     });
                 } else {
                     var isNew = !db.get("users")[name];
@@ -481,10 +467,10 @@ function setupSocket(server) {
                             log.info(ws, null, "Added user: ", chalk.magenta(name));
                         else
                             log.info(ws, null, "Updated user: ", chalk.magenta(name));
-                        sendUsers(cookie);
+                        sendUsers(sid);
                     });
                 }
-                if (db.get("sessions")[cookie].privileged) sendUsers(cookie);
+                if (db.get("sessions")[sid].privileged) sendUsers(sid);
                 break;
             case "CREATE_FILES":
                 var files = Array.isArray(msg.data.files) ? msg.data.files : [msg.data.files];
@@ -501,7 +487,7 @@ function setupSocket(server) {
                         });
                     }, function (err) {
                         if (err) log.error(ws, null, err);
-                        if (msg.data.isUpload) send(clients[cookie].ws, JSON.stringify({ type : "UPLOAD_DONE", vId : vId }));
+                        if (msg.data.isUpload) sendObj(sid,{type: "UPLOAD_DONE", vId: vId});
                     }
                 );
                 break;
@@ -513,7 +499,7 @@ function setupSocket(server) {
                         utils.mkdir(utils.addFilesPath(folder), callback);
                     }, function (err) {
                         if (err) log.error(ws, null, err);
-                        if (msg.data.isUpload) send(clients[cookie].ws, JSON.stringify({ type : "UPLOAD_DONE", vId : vId }));
+                        if (msg.data.isUpload) sendObj(sid, {type: "UPLOAD_DONE", vId: vId});
                     }
                 );
                 break;
@@ -543,8 +529,9 @@ function setupSocket(server) {
                 db.set("sessions", sessions);
             } else if (code === 1001) {
                 reason = "(Going away)";
-                delete clients[cookie];
             }
+            removeClientPerDir(sid);
+            delete clients[sid];
             log.info(ws, null, "WebSocket [", chalk.red("disconnected"), "] ", reason || "(Code: " + (code || "none")  + ")");
         });
 
@@ -554,9 +541,9 @@ function setupSocket(server) {
 
 //-----------------------------------------------------------------------------
 // Send a file list update
-function sendFiles(cookie, vId, eventType, sizes) {
-    if (!clients[cookie]  || !clients[cookie].views[vId] || !clients[cookie].ws || !clients[cookie].ws.socket) return;
-    var dir = clients[cookie].views[vId].directory,
+function sendFiles(sid, vId, eventType, sizes) {
+    if (!clients[sid]  || !clients[sid].views[vId] || !clients[sid].ws || !clients[sid].ws.socket) return;
+    var dir = clients[sid].views[vId].directory,
         data = {
             vId    : vId,
             type   : eventType,
@@ -564,46 +551,34 @@ function sendFiles(cookie, vId, eventType, sizes) {
             data   : dirs[dir]
         };
     if (sizes) data.sizes = true;
-    send(clients[cookie].ws, JSON.stringify(data));
-}
-
-//-----------------------------------------------------------------------------
-// Send a file link to a client
-function sendLink(cookie, link, vId) {
-    if (!clients[cookie] || !clients[cookie].ws) return;
-    send(clients[cookie].ws, JSON.stringify({
-        vId  : vId,
-        type : "SHARELINK",
-        link : link
-    }));
+    sendObj(sid, data);
 }
 
 //-----------------------------------------------------------------------------
 // Send a list of users on the server
-function sendUsers(cookie) {
-    if (!clients[cookie] || !clients[cookie].ws) return;
+function sendUsers(sid) {
     var userDB   = db.get("users"),
         userlist = {};
 
     Object.keys(userDB).forEach(function (user) {
         userlist[user] = userDB[user].privileged || false;
     });
-
-    send(clients[cookie].ws, JSON.stringify({
-        type  : "USER_LIST",
-        users : userlist
-    }));
+    sendObj(sid, {type: "USER_LIST", users: userlist});
 }
 
 //-----------------------------------------------------------------------------
-// Send status of a file save
-function sendSaveStatus(cookie, vId, status) {
-    if (!clients[cookie] || !clients[cookie].ws) return;
-    send(clients[cookie].ws, JSON.stringify({
-        type   : "SAVE_STATUS",
-        vId    : vId,
-        status : status
-    }));
+// Send js object to single client identified by its session cooke
+function sendObj(sid, data) {
+    if (!clients[sid] || !clients[sid].ws) return;
+    send(clients[sid].ws, JSON.stringify(data));
+}
+
+//-----------------------------------------------------------------------------
+// Send js object to all clients
+function sendObjAll(data) {
+    Object.keys(clients).forEach(function (sid) {
+        send(clients[sid].ws, JSON.stringify(data));
+    });
 }
 
 //-----------------------------------------------------------------------------
@@ -616,7 +591,7 @@ function send(ws, data) {
                 var debugData = JSON.parse(data);
                 // Remove some spammy logging
                 if (debugData.type === "UPDATE_DIRECTORY") debugData.data = {"...": "..."};
-                if (debugData.type === "UPDATE_CSS") debugData.css = {"...": "..."};
+                if (debugData.type === "RELOAD" && debugData.css) debugData.css = {"...": "..."};
                 log.debug(ws, null, chalk.green("SEND "), JSON.stringify(debugData));
             }
             ws.sendUTF(data);
@@ -686,7 +661,7 @@ function handleGET(req, res) {
             handleResourceRequest(req, res, "auth.html");
         }
     } else if (/^\/\?!\//.test(URI)) {
-        handleResourceRequest(req, res, URI.match(/\?!\/([\s\S]+)$/)[1]);
+        handleResourceRequest(req, res, (/\?!\/([\s\S]+)$/.exec(URI)[1]));
     } else if (/^\/\?[~\$]\//.test(URI)) {
         handleFileRequest(req, res, true);
     } else if (/^\/\?\?\//.test(URI)) {
@@ -774,19 +749,6 @@ function handlePOST(req, res) {
 function handleResourceRequest(req, res, resourceName) {
     var resource;
 
-    // CSS debugging
-    if (config.debug && resourceName === "style.css") {
-        res.writeHead(200, {
-            "Content-Type"   : "text/css; charset=utf-8",
-            "Cache-Control"  : "private, max-age=0",
-            "Expires"        : "0",
-            "Content-Length" : cache.css.length
-        });
-        res.end(cache.css);
-        log.info(req, res);
-        return;
-    }
-
     // Assign filename, must be unique for resource requests
     if (/^\/\?!\/theme\//.test(req.url)) {
         resource = cache.themes[req.url.substring("/?!/theme/".length)];
@@ -841,7 +803,7 @@ function handleResourceRequest(req, res, resourceName) {
 
             // Encoding, Length
             var acceptEncoding = req.headers["accept-encoding"] || "";
-            if ((/\bgzip\b/.test(acceptEncoding) || req.isSpdy) && resource.gzip !== undefined) {
+            if ((/\bgzip\b/.test(acceptEncoding) || req.isSpdy) && resource.gzip && !config.debug) {
                 headers["Content-Encoding"] = "gzip";
                 headers["Content-Length"] = resource.gzip.length;
                 headers["Vary"] = "Accept-Encoding";
@@ -863,7 +825,7 @@ function handleFileRequest(req, res, download) {
     var URI = decodeURIComponent(req.url), shareLink, filepath;
 
     // Check for a shareLink
-    filepath = URI.match(/\?([\$~_])\/([\s\S]+)$/);
+    filepath = /\?([\$~_])\/([\s\S]+)$/.exec(URI);
     if (filepath[1] === "$") {
         shareLink = true;
         filepath = utils.addFilesPath(db.get("sharelinks")[filepath[2]]);
@@ -960,16 +922,16 @@ function handleUploadRequest(req, res) {
         cookie   = cookies.get(req.headers.cookie);
 
     req.query = qs.parse(req.url.substring("/upload?".length));
-    log.info(req, res, "Upload started");
 
-    // FEATURE: Check permissions
-    if (!clients[cookie] && !config.public) {
+    if (!cookie && !config.public) {
         res.statusCode = 500;
         res.setHeader("Content-Type", "text/plain");
         res.end();
         log.info(req, res);
         return;
     }
+
+    log.info(req, res, "Upload started");
 
     opts = { headers: req.headers, fileHwm: 1024 * 1024, limits: {fieldNameSize: 255, fieldSize: 10 * 1024 * 1024}};
 
@@ -1059,7 +1021,13 @@ function handleUploadRequest(req, res) {
         res.setHeader("Content-Type", "text/plain");
         res.setHeader("Connection", "close");
         res.end();
-        send(clients[cookie].ws, JSON.stringify({ type : "UPLOAD_DONE", vId : parseInt(req.query.vId, 10) }));
+
+        // find websocket sid of the client and send the final event
+        Object.keys(clients).forEach(function (sid) {
+            if (clients[sid].cookie === cookie) {
+                sendObj(sid, {type: "UPLOAD_DONE", vId: parseInt(req.query.vId, 10)});
+            }
+        });
     }
 }
 
@@ -1119,19 +1087,19 @@ function updateDirectory(root, callback) {
 }
 
 function generateDirSizes(root, dirContents, callback) {
-    var tmpDirs = [];
+    var todoDirs = [];
     Object.keys(dirContents).forEach(function (dir) {
         if (dirContents[dir].type === "d")
-            tmpDirs.push(utils.addFilesPath(path.join(root, "/", dir)));
+            todoDirs.push(utils.addFilesPath(path.join(root, "/", dir)));
     });
-    if (tmpDirs.length === 0) return;
+    if (todoDirs.length === 0) return;
 
-    async.map(tmpDirs, du, function (err, results) {
+    async.map(todoDirs, du, function (err, results) {
         results.forEach(function (result, i) {
-            if (dirs[root][path.basename(tmpDirs[i])])
-                dirs[root][path.basename(tmpDirs[i])].size = result;
+            if (dirs[root][path.basename(todoDirs[i])])
+                dirs[root][path.basename(todoDirs[i])].size = result;
             else
-                log.error("Directory not cached", root, path.basename(tmpDirs[i]));
+                log.error("Directory not cached", root, path.basename(todoDirs[i]));
         });
         callback(true);
     });
@@ -1207,60 +1175,78 @@ setInterval(function hourly() {
 }, 60 * 60 * 1000);
 
 //-----------------------------------------------------------------------------
-// Update clients on file changes
-function watcherUpdate(event, p) {
-    var dir = path.dirname(p);
-    dir = (dir === ".") ? "/" : "/" + dir;
-    log.debug("Watcher event: " + chalk.blue("'" + event + "'") + " in ", chalk.blue(dir));
-    var clientsToUpdate = [];
-    Object.keys(clients).forEach(function (cookie) {
-        clients[cookie].views.forEach(function (view, vId) {
-            if (view && view.directory === dir) {
-                clientsToUpdate.push({cookie: cookie, vId: vId});
-            }
+// Watcher callback for files
+function filesUpdate(type, event, p) {
+    p = utils.normalizePath(p);              // Remove OS inconsistencies
+    p = (p === ".") ? "/" : "/" + p;         // Prefix "/"
+
+    log.debug("[" + chalk.magenta("FS:" + event) + "] " + chalk.blue(p));
+
+    var dir;
+    if (type === "dir") { // "addDir", "unlinkDir"
+        if (p === "/") return; // Should never happen
+        dir = path.resolve(p, "..");
+    } else { // "add", "unlink",  "change"
+        dir = path.dirname(p);
+    }
+
+    if (!clientsPerDir[dir]) return;
+
+    // read the dir and push updates
+    updateDirectory(dir, function (sizes) {
+        clientsPerDir[dir].forEach(function (client) {
+            client.update(sizes);
         });
     });
-    if (clientsToUpdate.length > 0) {
-        updateDirectory(dir, function (sizes) {
-            clientsToUpdate.forEach(function (cl) {
-                sendFiles(cl.cookie, cl.vId, "UPDATE_DIRECTORY", sizes);
-            });
+}
+
+function updateClientsPerDir(dir, sid, vId) {
+    // remove current client from any previous dirs
+    removeClientPerDir(sid, vId);
+
+    // and add client back
+    if (!clientsPerDir[dir]) clientsPerDir[dir] = [];
+    clientsPerDir[dir].push({
+        sid    : sid,
+        vId    : vId,
+        update : _.throttle(function (sizes) {
+           sendFiles(this.sid, this.vId, "UPDATE_DIRECTORY", sizes);
+        }, UPDATE_THROTTLE, {leading: true, trailing: true})
+    });
+}
+
+function removeClientPerDir(sid, vId) {
+    Object.keys(clientsPerDir).forEach(function(dir) {
+        var removeAt = [];
+        clientsPerDir[dir].forEach(function(client, i) {
+            if (client.sid === sid && (typeof vId === "number" ? client.vId === vId : true)) {
+                removeAt.push(i);
+            }
         });
-    }
+        removeAt.reverse().forEach(function(pos) {
+            clientsPerDir[dir].splice(pos, 1);
+        });
+
+        // purge dirs with no clients
+        if (!clientsPerDir[dir].length) delete clientsPerDir[dir];
+    });
 }
 
 //-----------------------------------------------------------------------------
-// Watch and update style.css for debugging
-function watchCSS() {
-    fs.watch(path.join(paths.client, "/style.css"), updateCSS);
-}
-
-var lastUpdates = {};
-function updateCSS(event, filename, cb) {
-    if (!lastUpdates[filename] || Date.now() - lastUpdates[filename] > 1000) {
-        lastUpdates[filename] = Date.now();
-        setTimeout(function () { // Short timeout in case Windows still has the file locked
-            var css = "";
-
-            resources.files.css.forEach(function (file) {
-                css += fs.readFileSync(path.join(paths.mod, file)).toString("utf8");
-            });
-
-            css = ap.process(css).css;
-            cache.css = css;
-
-            if (typeof cb === "function") { // Initial cache seeding
-                cb();
-            } else {
-                Object.keys(clients).forEach(function (cookie) {
-                    send(clients[cookie].ws, JSON.stringify({
-                        "type"  : "UPDATE_CSS",
-                        "css"   : cache.css
-                    }));
-                });
-            }
-        }, 200);
-    }
+// Update client directory on changes
+function clientUpdate(filepath) {
+    setTimeout(function () { // prevent EBUSY on win32
+        if (/css$/.test(filepath)) {
+            cache.res["style.css"] = resources.compileCSS();
+            sendObjAll({type: "RELOAD", css: cache.res["style.css"].data.toString("utf8")});
+        } else if (/js$/.test(filepath)) {
+            cache.res["client.js"] = resources.compileJS();
+            sendObjAll({type: "RELOAD"});
+        } else if (/html$/.test(filepath)) {
+            resources.compileHTML(cache.res);
+            sendObjAll({type: "RELOAD"});
+        }
+    }, 100);
 }
 
 //-----------------------------------------------------------------------------
@@ -1320,11 +1306,11 @@ function setupProcess(standalone) {
 function endProcess(signal) {
     var count = 0;
     log.simple("Received " + chalk.red(signal) + " - Shutting down ...");
-    Object.keys(clients).forEach(function (client) {
-        if (!clients[client] || !clients[client].ws) return;
-        if (clients[client].ws.state === "open" || clients[client].ws.state === "connecting") {
+    Object.keys(clients).forEach(function (sid) {
+        if (!clients[sid] || !clients[sid].ws) return;
+        if (clients[sid].ws.state === "open" || clients[sid].ws.state === "connecting") {
             count++;
-            clients[client].ws.drop(1001);
+            clients[sid].ws.drop(1001);
         }
     });
     if (count > 0) log.simple("Closed " + count + " active WebSocket" + (count > 1 ? "s" : ""));

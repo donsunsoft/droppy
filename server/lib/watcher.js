@@ -1,75 +1,48 @@
 "use strict";
 
-var interval, update,
-    watcher  = {},
-    watchers = {},
-    _        = require("lodash"),
-    chalk    = require("chalk"),
+var watcher  = {},
     chokidar = require("chokidar"),
-    fs       = require("graceful-fs"),
+    chalk    = require("chalk"),
     log      = require("./log.js"),
-    paths    = require("./paths.js").get(),
-    utils    = require("./utils.js");
+    paths    = require("./paths.js").get();
 
-watcher.init = function init(intervalValue, updateFunc, cb) {
-    interval = intervalValue;
-    update = updateFunc;
-    cb();
+var opts = {
+    files: {
+        cwd           : paths.files,
+        alwaysStat    : true,
+        ignoreInitial : true
+    },
+    client: {
+        cwd           : paths.client,
+        alwaysStat    : true,
+        ignoreInitial : true
+    },
 };
 
-var chokidarOpts = {
-    ignoreInitial : true,
-    depth         : 1,
-    cwd           : paths.files
-};
+watcher.watchResources = function watchResources(usePolling, cb) {
+    opts.client.usePolling = usePolling;
 
-//-----------------------------------------------------------------------------
-// Watch the directory for changes and send them to the appropriate clients.
-watcher.createWatcher = function createWatcher(dir) {
-    log.debug(chalk.green("Adding Watcher: ") + dir);
-    watchers[dir] = chokidar.watch(dir, chokidarOpts).on("all", _.throttle(update, interval, {leading: false, trailing: true}));
-};
-
-//-----------------------------------------------------------------------------
-// Watch given directory
-watcher.updateWatchers = function updateWatchers(newDir, clients, callback) {
-    if (!watchers[newDir]) {
-        fs.stat(utils.addFilesPath(newDir), function (error, stats) {
-            if (error || !stats) {
-                // Requested Directory can't be read
-                watcher.checkWatchedDirs(clients);
-                if (callback) callback(false);
-            } else {
-                // Directory is okay to be read
-                watcher.createWatcher(newDir);
-                watcher.checkWatchedDirs(clients);
-                if (callback) callback(true);
-            }
+    chokidar.watch(".", opts.client)
+        .on("error", log.error)
+        .on("change", cb)
+        .on("ready", function () {
+            log.info("Watching " + chalk.blue(opts.client.cwd) + " for changes.");
         });
-    } else {
-        if (callback) callback(true);
-    }
 };
 
-//-----------------------------------------------------------------------------
-// Check if we need the other active watchers
-watcher.checkWatchedDirs = function checkWatchedDirs(clients) {
-    var neededDirs = {};
-    Object.keys(clients).forEach(function (cookie) {
-        var client = clients[cookie];
-        client.views.forEach(function (view, vId) {
-            if (view && view.directory && view.file === null) {
-                neededDirs[client.views[vId].directory] = true;
-            }
+watcher.watchFiles = function watchFiles(usePolling, cb) {
+    opts.files.usePolling = usePolling;
+
+    chokidar.watch(".", opts.files)
+        .on("add", cb.bind(null, "file", "add"))
+        .on("unlink", cb.bind(null, "file", "unlink"))
+        .on("change", cb.bind(null, "file", "change"))
+        .on("addDir", cb.bind(null, "dir", "addDir"))
+        .on("unlinkDir", cb.bind(null, "dir", "unlinkDir"))
+        .on("error", log.error)
+        .on("ready", function () {
+            log.info("Watching " + chalk.blue(opts.files.cwd) + " for changes.");
         });
-    });
-    Object.keys(watchers).forEach(function (watchedDir) {
-        if (!neededDirs[watchedDir]) {
-            log.debug(chalk.red("Removing Watcher: ") + watchedDir);
-            watchers[watchedDir].close();
-            delete watchers[watchedDir];
-        }
-    });
 };
 
 module.exports = watcher;

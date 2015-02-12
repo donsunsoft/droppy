@@ -91,6 +91,25 @@ utils.getExt = function getExt(filename) {
         return filename;
 };
 
+// Get a pseudo-random n-character lowercase string. The characters
+// "l", "1", "i", "o", "0" characters are skipped for easier communication of links.
+utils.getLink = function getLink(links, length) {
+    var chars = "abcdefghjkmnpqrstuvwxyz23456789", link = "";
+    do {
+        while (link.length < length) {
+            link += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+    } while (links[link]); // In case the RNG generates an existing link, go again
+
+    return link;
+};
+
+// Get a unique string, used to identify websocket session
+utils.newSid = function getSid() {
+    var hrtime = process.hrtime();
+    return String(hrtime[0] + hrtime[1]);
+};
+
 utils.getNewPath = function getNewPath(origPath, callback) {
     fs.stat(origPath, function (err, stats) {
         if (err) callback(origPath);
@@ -144,20 +163,20 @@ utils.copyFile = function copyFile(source, target, cb) {
     }
 };
 
-function normalize(p) {
+utils.normalizePath = function normalizePath(p) {
     return p.replace(/[\\|\/]+/g, "/");
-}
+};
 
 utils.addFilesPath = function addFilesPath(p) {
     return path.join(paths.files + "/" + p);
 };
 
 utils.removeFilesPath = function removeFilesPath(p) {
-    return normalize("/" + path.relative(paths.files, p));
+    return utils.normalizePath("/" + path.relative(paths.files, p));
 };
 
 utils.relativeZipPath = function removeFilesPath(p) {
-    return normalize(path.relative(normalize(paths.files), normalize(p)));
+    return utils.normalizePath(path.relative(utils.normalizePath(paths.files), utils.normalizePath(p)));
 };
 
 utils.isPathSane = function isPathSane(name) {
