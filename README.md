@@ -18,12 +18,12 @@ droppy is a self-hosted file server with an interface similar to many desktop fi
 $ [sudo] npm install -g droppy
 $ droppy start
 ```
-droppy's home folder will be created in `~/.droppy` unless the `--home` option is provided. To edit the config, run `droppy config` after the server has started up at least once to generate the config file.
+droppy's home folder will be created in `~/.droppy` unless the `--home` option is provided.
 
 Once initialized, the server will by default listen on [http://localhost:8989/](http://localhost:8989/). On first startup, a prompt for username and password for the first account will appear.
 
 ### Configuration
-`config/config.json` is created with these defaults:
+Run `droppy config` to edit `config/config.json`, which is created with these defaults:
 ```javascript
 {
   "listeners" : [
@@ -33,15 +33,16 @@ Once initialized, the server will by default listen on [http://localhost:8989/](
           "protocol" : "http"
       }
   ],
-  "debug"        : false,
-  "keepAlive"    : 20000,
-  "linkLength"   : 5,
-  "logLevel"     : 2,
-  "maxFileSize"  : 0,
-  "maxOpen"      : 256,
-  "public"       : false,
-  "timestamps"   : true,
-  "usePolling"   : false
+  "debug"          : false,
+  "keepAlive"      : 20000,
+  "linkLength"     : 5,
+  "logLevel"       : 2,
+  "maxFileSize"    : 0,
+  "maxOpen"        : 256,
+  "public"         : false,
+  "timestamps"     : true,
+  "updateInterval" : 250
+  "usePolling"     : false
 }
 ```
 ### Options
@@ -54,6 +55,7 @@ Once initialized, the server will by default listen on [http://localhost:8989/](
 - `maxOpen` {Number} - The maximum number of concurrently opened files. This number should only be of concern on Windows.
 - `public` {Boolean} - When enabled, no authentication is performed.
 - `timestamps` {Boolean} - When enabled, adds timestamps to log output.
+- `updateInterval` {Number} - Interval in which a single client can receive updates through changes in the file tree, in milliseconds.
 - `usePolling` {Boolean} - On certain conditions (home mounted through NFS, or running on hosted node), realtime updates may not work. This switch should make it more reliable in these cases, at the cost of CPU cycles.
 
 <a name="listener-object" />

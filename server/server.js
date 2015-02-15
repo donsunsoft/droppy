@@ -21,6 +21,7 @@ var _          = require("lodash"),
     engine     = require("detect-engine"),
     fs         = require("graceful-fs"),
     mv         = require("mv"),
+    readdirp   = require("readdirp"),
     Wss        = require("websocket").server,
     yazl       = require("yazl");
 
@@ -37,8 +38,6 @@ var cache         = {},
     hasServer     = null,
     ready         = false,
     isDemo        = process.env.NODE_ENV === "droppydemo";
-
-var UPDATE_THROTTLE = 500;
 
 var droppy = function droppy(options, isStandalone, callback) {
     if (isStandalone) {
@@ -66,7 +65,7 @@ var droppy = function droppy(options, isStandalone, callback) {
                 cb(err);
             });
         },
-        function (cb) { db.init(cb); },
+        function (cb) { db.init(cb); }
     ], function (err) {
         if (err) return callback(err);
         log.init({logLevel: config.logLevel, timestamps: config.timestamps});
@@ -84,9 +83,10 @@ var droppy = function droppy(options, isStandalone, callback) {
             },
             function (cb) { cleanupTemp(); cb(); },
             function (cb) { cleanupLinks(cb); },
-            function (cb) { if (isDemo) demo.init(function (err) { if (err) log.error(err); }); cb(); },
             function (cb) { if (config.debug) watcher.watchResources(config.usePolling, clientUpdate); cb(); },
             function (cb) { watcher.watchFiles(config.usePolling, filesUpdate); cb(); },
+            function (cb) { if (isDemo) demo.init(function (err) { if (err) log.error(err); }); cb(); },
+            function (cb) { updateDirectory("/", cb); }
         ], function (err) {
             if (err) return callback(err);
             if (isDemo) setInterval(demo.init, 30 * 60 * 1000);
@@ -312,30 +312,28 @@ function setupSocket(server) {
             case "REQUEST_UPDATE":
                 if (!utils.isPathSane(msg.data)) return log.info(ws, null, "Invalid update request: " + msg.data);
                 if (!clients[sid]) clients[sid] = { views: [], ws: ws }; // This can happen when the server restarts
-                readPath(msg.data, function (error, info) {
+                getPath(msg.data, function (err, type) {
                     var clientDir, clientFile;
-                    if (error) { // Send client back to root when the requested path doesn't exist
+                    if (err) { // Send client back to root when the requested path doesn't exist
                         clientDir = "/";
                         clientFile = null;
-                        log.error(error);
+                        log.error(err);
                         log.info(ws, null, "Non-existing update request, sending client to / : " + msg.data);
-                        updateDirectory("/", function (sizes) {
-                            sendFiles(sid, vId, "UPDATE_DIRECTORY", sizes);
-                        });
                         return;
-                    } else if (info.type === "f") {
+                    } else if (type === "f") {
                         clientDir = path.dirname(msg.data);
                         clientFile = path.basename(msg.data);
                         sendObj(sid, {type: "UPDATE_BE_FILE", file: clientFile, folder: clientDir, isFile: true, vId: vId});
                     } else {
                         clientDir = msg.data;
                         clientFile = null;
-                        updateDirectory(clientDir, function (sizes) {
-                            sendFiles(sid, vId, "UPDATE_DIRECTORY", sizes);
-                        });
+
                     }
                     clients[sid].views[vId] = { file: clientFile, directory: clientDir };
-                    if (!clientFile) updateClientsPerDir(clientDir, sid, vId);
+                    if (!clientFile) {
+                        updateClientsPerDir(clientDir, sid, vId);
+                        sendFiles(sid, vId);
+                    }
                 });
                 break;
             case "DESTROY_VIEW":
@@ -549,17 +547,15 @@ function setupSocket(server) {
 
 //-----------------------------------------------------------------------------
 // Send a file list update
-function sendFiles(sid, vId, eventType, sizes) {
+function sendFiles(sid, vId) {
     if (!clients[sid]  || !clients[sid].views[vId] || !clients[sid].ws || !clients[sid].ws.socket) return;
-    var dir = clients[sid].views[vId].directory,
-        data = {
-            vId    : vId,
-            type   : eventType,
-            folder : dir,
-            data   : dirs[dir]
-        };
-    if (sizes) data.sizes = true;
-    sendObj(sid, data);
+    var dir = clients[sid].views[vId].directory;
+    sendObj(sid, {
+        type   : "UPDATE_DIRECTORY",
+        vId    : vId,
+        folder : dir,
+        data   : getDirContents(dir)
+    });
 }
 
 //-----------------------------------------------------------------------------
@@ -598,7 +594,6 @@ function send(ws, data) {
             if (config.logLevel === 3) {
                 var debugData = JSON.parse(data);
                 // Remove some spammy logging
-                if (debugData.type === "UPDATE_DIRECTORY") debugData.data = {"...": "..."};
                 if (debugData.type === "RELOAD" && debugData.css) debugData.css = {"...": "..."};
                 log.debug(ws, null, chalk.green("SEND "), JSON.stringify(debugData));
             }
@@ -610,22 +605,31 @@ function send(ws, data) {
 }
 //-----------------------------------------------------------------------------
 // Perform clipboard operation, copy/paste or cut/paste
-function doClipboard(type, from, to) {
-    fs.stat(from, function (error, stats) {
-        if (error) return logError(error);
+function doClipboard(type, src, dst) {
+    fs.stat(src, function (err, stats) {
+        if (err) return logError(err);
         if (stats) {
             if (type === "cut") {
-                mv(from, to, logError);
+                mv(src, dst, logError);
             } else {
                 if (stats.isFile()) {
-                    utils.copyFile(from, to, logError);
+                    utils.copyFile(src, dst, logError);
                 } else {
-                    fs.readdir(from, function (error, files) {
-                        if (error) return logError(error);
+                    fs.readdir(src, function (err, files) {
+                        if (err) return logError(err);
                         if (files.length) {
-                            cpr(from, to, {deleteFirst: false, overwrite: true, confirm: true}, logError);
+                            cpr(src, dst, {deleteFirst: false, overwrite: true, confirm: true}, function (errs) {
+                                if (!errs) return;
+                                errs.forEach(function (err) {
+                                    if (err.code === "ENOENT" && err.syscall === "stat") { // cpr bug
+                                        utils.mkdir(err.path);
+                                    } else {
+                                        logError(err);
+                                    }
+                                });
+                            });
                         } else {
-                            utils.mkdir(to);
+                            utils.mkdir(dst);
                         }
                     });
                 }
@@ -633,18 +637,10 @@ function doClipboard(type, from, to) {
         }
     });
 
-    function logError(error) {
-        if (!error) return;
-        if (type === "cut")
-            log.error("Error moving from \"" + from + "\" to \"" + to + "\"");
-        else  {
-            if (error === "no files to copy") {
-                utils.mkdir(to);
-            } else {
-                log.error("Error copying from \"" + from + "\" to \"" + to + "\"");
-            }
-        }
-        log.error(error);
+    function logError(err) {
+        if (!err) return;
+        log.error("Error " + (type === "cut" ? "moving" : "copying") + " from " + chalk.blue(src) + " to " + chalk.magenta(dst));
+        log.error(err);
     }
 }
 
@@ -1040,82 +1036,105 @@ function handleUploadRequest(req, res) {
 }
 
 //-----------------------------------------------------------------------------
-// Read a path, return type and info
-// @callback : function (err, info)
-function readPath(root, callback) {
-    fs.stat(utils.addFilesPath(root), function (err, stats) {
-        if (err) {
-            callback(null, {
-                type: "e",
-                size: 0,
-                mtime: 0
-            });
-        } else if (stats.isFile()) {
-            callback(null, {
-                type: "f",
-                size: stats.size,
-                mtime: stats.mtime.getTime() || 0,
-                mime: mime.lookup(path.basename(root))
-            });
-        } else if (stats.isDirectory()) {
-            callback(null, {
-                type: "d",
-                size: 0,
-                mtime: stats.mtime.getTime() || 0
+// Check if path is a file or dir
+function getPath(p, cb) {
+    var found = Object.keys(dirs).some(function (dir) {
+        if (p === dir) {
+            cb(null, "d");
+            return true;
+        } else if (path.dirname(p) === dir) {
+            return dirs[dir].files.some(function (file) {
+                if (path.basename(p) === file.name) {
+                    cb(null, "f");
+                    return true;
+                }
             });
         }
     });
+    if (found) return;
+    log.error("path not in cache, trying stat() on " + chalk.blue(p));
+    fs.lstat(utils.addFilesPath(p), function (err, stats) {
+        if (err) {
+            cb(err);
+        } else if (stats.isFile()) {
+            cb(null, "f");
+        } else if (stats.isDirectory()) {
+            cb(null, "d");
+        }
+    });
 }
-//-----------------------------------------------------------------------------
-// Update a directory's content
-function updateDirectory(root, callback) {
-    fs.readdir(utils.addFilesPath(root), function (error, files) {
-        var dirContents = {}, fileNames;
-        if (error) log.error(error);
-        if (!files || files.length === 0) {
-            dirs[root] = dirContents;
-            callback();
+
+// -----------------------------------------------------------------------------
+// Get directory contents from cache
+function getDirContents(p) {
+    var entries = {};
+    dirs[p].files.forEach(function (file) {
+        entries[file.name] = {type: "f", size: file.size, mtime: file.mtime, mime: file.mime};
+    });
+    Object.keys(dirs).forEach(function (dir) {
+        if (path.dirname(dir) === p && path.basename(dir)) {
+            entries[path.basename(dir)] = {type: "d", mtime: dirs[dir].mtime, size: dirs[dir].size};
+        }
+    });
+    return entries;
+}
+
+// -----------------------------------------------------------------------------
+// Update directory in cache
+function updateDirectory(dir, cb) {
+    readdirp({root: utils.addFilesPath(dir)}, function (errors, results) {
+        dirs[dir] = {files: []};
+        if (errors) {
+            errors.forEach(function (err) {
+                // "unlinkDir" can happen out of order
+                if (err.code === "ENOENT" && dirs[utils.removeFilesPath(err.path)]) {
+                    delete dirs[utils.removeFilesPath(err.path)];
+                } else {
+                    log.error(err);
+                }
+            });
+            cb();
             return;
         }
-        fileNames = files;
-        files = files.map(function (entry) { return root + "/" + entry; });
-        async.map(files, readPath, function (err, results) {
-            var i = fileNames.length;
-            while (i > -1) {
-                if (results[i]) {
-                    dirContents[fileNames[i]] = results[i];
-                }
-                i--;
-            }
-            dirs[root] = dirContents;
-            callback();
-            generateDirSizes(root, dirContents, callback);
+
+        // Add directories
+        results.directories.forEach(function (d) {
+            dirs[utils.removeFilesPath(d.fullPath)] = {
+                files: [],
+                size: 0,
+                mtime: d.stat.mtime.getTime() || 0
+            };
+        });
+
+        // Add files
+        results.files.forEach(function (file) {
+            dirs[utils.removeFilesPath(file.fullParentDir)].files.push({
+                name: file.name,
+                size: file.stat.size,
+                mtime: file.stat.mtime.getTime() || 0,
+                mime: mime.lookup(file.name)
+            });
+        });
+
+        // Calculate folder sizes
+        var folders = Object.keys(dirs);
+        folders.splice(0, 1); // we don't care about the size of '/'
+
+        var folderPaths = folders.map(function(folder) {
+            return utils.addFilesPath(folder);
+        });
+
+        async.map(folderPaths, du, function (err, results) {
+            results.forEach(function (result, i) {
+                dirs[folders[i]].size = results[i];
+            });
+            cb();
         });
     });
 }
 
-function generateDirSizes(root, dirContents, callback) {
-    var todoDirs = [];
-    Object.keys(dirContents).forEach(function (dir) {
-        if (dirContents[dir].type === "d")
-            todoDirs.push(utils.addFilesPath(path.join(root, "/", dir)));
-    });
-    if (todoDirs.length === 0) return;
-
-    async.map(todoDirs, du, function (err, results) {
-        results.forEach(function (result, i) {
-            if (dirs[root][path.basename(todoDirs[i])])
-                dirs[root][path.basename(todoDirs[i])].size = result;
-            else
-                log.error("Directory not cached", root, path.basename(todoDirs[i]));
-        });
-        callback(true);
-    });
-}
-
-//-----------------------------------------------------------------------------
-// Get a directory's size (the sum of all files inside it)
-// TODO: caching of results
+// //-----------------------------------------------------------------------------
+// // Get a directory's size (the sum of all files inside it)
 function du(dir, callback) {
     fs.stat(dir, function (error, stat) {
         if (error || !stat) return callback(null, 0);
@@ -1140,25 +1159,28 @@ function streamArchive(req, res, zipPath) {
         if (err) {
             log.error(err);
         } else if (stats.isDirectory()) {
-            res.statusCode = 200;
-            res.setHeader("Content-Type", mime.lookup("zip"));
-            res.setHeader("Content-Disposition", utils.getDispo(zipPath + ".zip"));
-            res.setHeader("Transfer-Encoding", "chunked");
             log.info(req, res);
             log.info("Streaming zip of ", chalk.blue(utils.removeFilesPath(zipPath)));
-            zip = new yazl.ZipFile();
-            utils.walkDirectory(zipPath, true, function (err, files) {
-                if (err) log.error(err);
-                Object.keys(files).forEach(function (file) {
-                    var stats = files[file];
-                    if (/\/$/.test(file))
-                        zip.addEmptyDirectory(utils.relativeZipPath(file), {mtime: stats.mtime, mode: stats.mode});
-                    else
-                        zip.addFile(file, utils.relativeZipPath(file), {mtime: stats.mtime, mode: stats.mode});
-                });
-                zip.outputStream.pipe(res);
-                zip.end();
+            res.writeHead(200, {
+                "Content-Type"       : mime.lookup("zip"),
+                "Content-Disposition": utils.getDispo(zipPath + ".zip"),
+                "Transfer-Encoding"  : "chunked"
             });
+            zip = new yazl.ZipFile();
+            readdirp({root: zipPath, entryType: "both"})
+                .on("warn", log.info)
+                .on("error", log.error)
+                .on("data", function (file) {
+                    var stats = file.stat;
+                    if (stats.isDirectory())
+                        zip.addEmptyDirectory(utils.relativeZipPath(file.fullPath), {mtime: stats.mtime, mode: stats.mode});
+                    else
+                        zip.addFile(file.fullPath, utils.relativeZipPath(file.fullPath), {mtime: stats.mtime, mode: stats.mode});
+                })
+                .on("end", function () {
+                    zip.outputStream.pipe(res);
+                    zip.end();
+                });
         } else {
             res.statusCode = 404;
             res.end();
@@ -1183,26 +1205,27 @@ setInterval(function hourly() {
 }, 60 * 60 * 1000);
 
 //-----------------------------------------------------------------------------
-// Watcher callback for files
-function filesUpdate(type, event, p) {
-    p = utils.normalizePath(p);              // Remove OS inconsistencies
-    p = (p === ".") ? "/" : "/" + p;         // Prefix "/"
+// Watcher callback for files, event = "addDir" || "unlinkDir" || "add" || "unlink" || "change"
+function filesUpdate(eventType, event, dir) {
+    dir = utils.normalizePath(dir);            // Remove OS inconsistencies
+    dir = (dir === ".") ? "/" : "/" + dir;     // Prefix "/"
 
-    log.debug("[" + chalk.magenta("FS:" + event) + "] " + chalk.blue(p));
+    log.debug("[" + chalk.magenta("FS:" + event) + "] " + chalk.blue(dir));
 
-    var dir;
-    if (type === "dir") { // "addDir", "unlinkDir"
-        if (p === "/") return; // Should never happen
-        dir = path.resolve(p, "..");
-    } else { // "add", "unlink",  "change"
-        dir = path.dirname(p);
-    }
+    if (dir === "/") return;                  // Should never happen
 
-    if (!clientsPerDir[dir]) return;
+    var parentDir = path.dirname(dir);        // Works on both dirs and files
+
+    if (event === "unlinkDir")                // unlinkDir fires before the files
+        delete dirs[dir];
+
+    if (!dirs[parentDir])
+        return;
 
     // read the dir and push updates
-    updateDirectory(dir, function (sizes) {
-        clientsPerDir[dir].forEach(function (client) {
+    updateDirectory(parentDir, function (sizes) {
+        if (!clientsPerDir[parentDir]) return;
+        clientsPerDir[parentDir].forEach(function (client) {
             client.update(sizes);
         });
     });
@@ -1217,9 +1240,7 @@ function updateClientsPerDir(dir, sid, vId) {
     clientsPerDir[dir].push({
         sid    : sid,
         vId    : vId,
-        update : _.throttle(function (sizes) {
-           sendFiles(this.sid, this.vId, "UPDATE_DIRECTORY", sizes);
-        }, UPDATE_THROTTLE, {leading: true, trailing: true})
+        update : _.throttle(sendFiles.bind(null, sid, vId), config.updateInterval, {leading: true, trailing: true})
     });
 }
 

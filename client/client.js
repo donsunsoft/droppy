@@ -387,25 +387,20 @@
                 view = getView(vId);
                 if (typeof view.data("type") === "undefined" || view[0].switchRequest) view.data("type", "directory"); // For initial loading
                 if (!view.length || view[0].isUploading) return;
-                if (msg.sizes) {
-                    addSizes(view, msg.folder, msg.data);
-                    view[0].currentData = msg.data;
-                } else {
-                    if (view.data("type") === "directory") {
-                        if (msg.folder !== getViewLocation(view)) {
-                            view[0].currentFile = null;
-                            view[0].currentFolder = msg.folder;
-                            if (view[0].vId === 0) updateTitle(basename(msg.folder));
-                            updatePath(view);
-                        }
-                        view[0].switchRequest = false;
-                        view[0].currentData = msg.data;
-                        openDirectory(view);
-                    } else if (view.data("type") === "image" || view.data("type") === "video") {
-                        view[0].currentData = msg.data;
-                        populateMediaCache(view, msg.data);
-                        bindMediaArrows(view);
+                if (view.data("type") === "directory") {
+                    if (msg.folder !== getViewLocation(view)) {
+                        view[0].currentFile = null;
+                        view[0].currentFolder = msg.folder;
+                        if (view[0].vId === 0) updateTitle(basename(msg.folder));
+                        updatePath(view);
                     }
+                    view[0].switchRequest = false;
+                    view[0].currentData = msg.data;
+                    openDirectory(view);
+                } else if (view.data("type") === "image" || view.data("type") === "video") {
+                    view[0].currentData = msg.data;
+                    populateMediaCache(view, msg.data);
+                    bindMediaArrows(view);
                 }
                 break;
             case "UPDATE_BE_FILE":
@@ -2669,33 +2664,6 @@
         };
     }
 
-    // Add directory sizes
-    function addSizes(view, folder, data) {
-        var bytes, name;
-        view.find(".content").each(function () {
-            if ($(this).data("root") === folder) {
-                droppy.sizeCache[folder] = {};
-                $(this).find(".folder-link").each(function () {
-                    name = $(this).text();
-                    if (data) bytes = data[name].size;
-                    if (bytes && bytes > 0) {
-                        // cache the  size information
-                        droppy.sizeCache[folder][name] = bytes;
-                        setSize(this, bytes);
-                    } else {
-                        // Try to load from cache
-                        if (droppy.sizeCache[folder] && droppy.sizeCache[folder][name])
-                            setSize(this, droppy.sizeCache[folder][name]);
-                    }
-                });
-            }
-        });
-    }
-
-    function setSize(el, bytes) {
-        $(el).siblings(".size").attr("data-size", bytes).text(prettyBytes(bytes));
-    }
-
     // SVG preprocessing
     function prepareSVG(html) {
         var tmp;
@@ -2866,7 +2834,7 @@
             clearTimeout(view[0].stuckTimeout);
             view[0].stuckTimeout = setTimeout(function () {
                 sendMessage(view[0].vId, "REQUEST_UPDATE", getViewLocation(view));
-            }, 5000);
+            }, 2000);
         }
     }
 
