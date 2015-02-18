@@ -1393,10 +1393,13 @@
         $(".drop-hover").removeClass("drop-hover");
         $(".dropzone").removeClass("in");
 
-        if (event.shiftKey) {
-            sendDrop(view, "cut", from, to, spinner);
-        } else if (event.ctrlKey || event.metaKey || event.altKey) {
+        var dragAction = view[0].dragAction;
+        delete view[0].dragAction;
+
+        if (dragAction === "copy" || event.ctrlKey || event.metaKey || event.altKey) {
             sendDrop(view, "copy", from, to, spinner);
+        } else if (dragAction === "cut" || event.shiftKey) {
+            sendDrop(view, "cut", from, to, spinner);
         } else {
             // Keep the drop-select in view
             var limit = dropSelect[0].offsetWidth / 2 - 20, left;
@@ -1444,6 +1447,12 @@
         view.find(".data-row .entry-link").attr("draggable", "true");
         view.register("dragstart", function (event) {
             var row = $(event.target).hasClass("data-row") ? $(event.target) : $(event.target).parents(".data-row");
+
+            if (event.ctrlKey || event.metaKey || event.altKey)
+                view[0].dragAction = "copy";
+            else if (event.shiftKey)
+                view[0].dragAction = "cut";
+
             droppy.dragTimer.refresh(row.data("id"));
             event.dataTransfer.setData("text", JSON.stringify({
                 type: row.attr("data-type"),
@@ -1798,13 +1807,13 @@
         var sortedEntries = droppy.templates.fn.sortKeysByProperty(view[0].currentData, header.attr("data-sort"));
         if (view[0].sortAsc) sortedEntries = sortedEntries.reverse();
         for (var index = sortedEntries.length - 1; index >= 0; index--) {
-            view.find("[data-name='" + sortedEntries[index] + "']:first").css({
+            view.find("[data-name='" + sortedEntries[index].replace(/['"]/g,"_") + "']:first").css({
                 "order": index,
                 "-ms-flex-order": String(index)
             }).attr("order", index);
         }
-
     }
+
     droppy.templates.fn.compare = function (a, b) {
         if (typeof a === "number" && typeof b === "number") {
             return b - a;
@@ -2747,7 +2756,7 @@
             msPerDay    = msPerHour * 24,
             msPerMonth  = msPerDay * 30,
             msPerYear   = msPerDay * 365,
-            elapsed     = Date.now() - previous,
+            elapsed     = Date.now() - parseInt(previous),
             result      = "";
 
         if (elapsed < 0) elapsed = 0;
@@ -2769,6 +2778,7 @@
             result = Math.round(elapsed / msPerYear);
             result += (result === 1) ? " year ago" : " years ago";
         }
+        if (isNaN(elapsed)) result = "unknown";
         return result;
     }
     droppy.templates.fn.timeDifference = timeDifference;
