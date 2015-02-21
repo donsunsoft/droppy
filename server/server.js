@@ -4,7 +4,6 @@ var pkg        = require("./../package.json"),
     resources  = require("./lib/resources.js"),
     cfg        = require("./lib/cfg.js"),
     cookies    = require("./lib/cookies.js"),
-    demo       = require("./lib/demo.js"),
     db         = require("./lib/db.js"),
     log        = require("./lib/log.js"),
     manifest   = require("./lib/manifest.js"),
@@ -86,7 +85,7 @@ var droppy = function droppy(options, isStandalone, callback) {
             function (cb) { if (config.debug) watcher.watchResources(config.usePolling, debugUpdate); cb(); },
             function (cb) {
                 if (isDemo) {
-                    demo.init(function (err) {
+                    require("./lib/demo.js").init(function (err) {
                         if (err) log.error(err);
                         cb();
                     });
@@ -96,7 +95,7 @@ var droppy = function droppy(options, isStandalone, callback) {
             function (cb) { watcher.watchFiles(config.usePolling, filesUpdate); cb(); }
         ], function (err) {
             if (err) return callback(err);
-            if (isDemo) setInterval(demo.init, 30 * 60 * 1000);
+
             ready = true;
             log.simple("Ready for requests!");
             callback();
@@ -214,12 +213,10 @@ function createListener(handler, opts, callback) {
     if (opts.proto === "http") {
         callback(null, http.createServer(handler));
     } else {
-        if (opts.proto === "https")
-            tlsModule = require("tls");
-        else if (opts.proto === "spdy")
+        if (opts.proto === "https" || opts.proto === "spdy")
             tlsModule = require("spdy").server;
         else
-            return callback(new Error("Config error: Unknown protocol type: " + opts.proto));
+            return callback(new Error("Config error: Unknown protocol: " + opts.proto));
 
         utils.tlsInit(opts, function (err, tlsData) {
             if (err) return callback(err);
@@ -230,21 +227,19 @@ function createListener(handler, opts, callback) {
                 ca               : tlsData.ca ? tlsData.ca : undefined,
                 dhparam          : tlsData.dhparam ? tlsData.dhparam : undefined,
                 honorCipherOrder : true,
-                NPNProtocols     : []
+                windowSize       : 4 * 1024 * 1024
             };
 
             // Slightly more secure options for 0.10.x
-            if (/^v0.10/.test(process.version)) {
+            if (engine === "node" && /^v0\.10/.test(process.version)) {
                 tlsOptions.ciphers = "ECDHE-RSA-AES256-SHA:AES256-SHA:RC4-SHA:RC4:HIGH:!MD5:!aNULL:!EDH:!AESGCM";
-                tlsOptions.secureProtocol = "SSLv23_server_method";
             } else {
-                tlsOptions.ciphers = "ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:HIGH:!RC4:!MD5:!aNULL";
+                tlsOptions.ciphers = "ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:" +
+                    "ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA";
             }
 
-            tlsModule.CLIENT_RENEG_LIMIT = 0; // No client renegotiation
-
-            // Protocol-specific options
-            if (opts.proto === "spdy") tlsOptions.windowSize = 1024 * 1024;
+            // Disable insecure client renegotiation
+            tlsModule.CLIENT_RENEG_LIMIT = 0;
 
             server = new tlsModule.Server(tlsOptions, http._connectionListener);
             server.httpAllowHalfOpen = false;
@@ -338,7 +333,7 @@ function setupSocket(server) {
                     }
                     clients[sid].views[vId] = { file: clientFile, directory: clientDir };
                     if (!clientFile) {
-                        updateClientsPerDir(clientDir, sid, vId);
+                        updateClientLocation(clientDir, sid, vId);
                         sendFiles(sid, vId);
                     }
                 });
@@ -623,9 +618,7 @@ function doClipboard(type, src, dst) {
                 if (stats.isFile()) {
                     utils.copyFile(src, dst, logError);
                 } else {
-                    cpr(src, dst, {deleteFirst: false, overwrite: true, confirm: true}, function (errs) {
-                        if (errs) errs.forEach(logError);
-                    });
+                    cpr(src, dst, {overwrite: true}, logError);
                 }
             }
         }
@@ -634,7 +627,12 @@ function doClipboard(type, src, dst) {
     function logError(err) {
         if (!err) return;
         log.error("Error " + (type === "cut" ? "moving" : "copying") + " from " + chalk.blue(src) + " to " + chalk.magenta(dst));
-        log.error(err);
+        if (Array.isArray(err))
+            err.forEach(log.error);
+        else if (err.list)
+            err.list.forEach(log.error);
+        else if (err instanceof Error)
+            log.error(err);
     }
 }
 
@@ -1077,7 +1075,7 @@ function getDirContents(p) {
 // -----------------------------------------------------------------------------
 // Update directory in cache
 function updateDirectory(dir, initial, cb) {
-    log.debug("Updating", chalk.blue(dir));
+    log.debug("Updating " + chalk.blue(dir));
     fs.stat(utils.addFilesPath(dir), function (err, stats) {
        readdirp({root: utils.addFilesPath(dir)}, function (errors, results) {
            dirs[dir] = {files: [], mtime: stats ? stats.mtime.getTime() : Date.now()};
@@ -1114,7 +1112,7 @@ function updateDirectory(dir, initial, cb) {
 
            // Calculate folder sizes
            var folders = Object.keys(dirs);
-           folders.splice(0, 1); // we don't care about the size of '/'
+           folders.splice(0, 1); // We don't care about the size of '/'
 
            var folderPaths = folders.map(function(folder) {
                return utils.addFilesPath(folder);
@@ -1130,8 +1128,14 @@ function updateDirectory(dir, initial, cb) {
     });
 }
 
-// //-----------------------------------------------------------------------------
-// // Get a directory's size (the sum of all files inside it)
+var debouncedUpdateDirectory = _.debounce(function(dir) {
+    updateDirectory(dir, false, function () {
+        updateClients(dir);
+    });
+}, 500); // TODO: magic number
+
+// -----------------------------------------------------------------------------
+//  Get a directory's size (the sum of all files inside it)
 function du(dir, callback) {
     fs.stat(dir, function (error, stat) {
         if (error || !stat) return callback(null, 0);
@@ -1147,16 +1151,6 @@ function du(dir, callback) {
         });
     });
 }
-
-//-----------------------------------------------------------------------------
-// updateDirectory is pretty costly, debounce it
-var debouncedUpdateDirectory = _.debounce(function(dir) {
-    updateDirectory(dir, false, function () {
-        clientsPerDir[dir].forEach(function (client) {
-            client.update();
-        });
-    });
-}, 1000); // TODO: magic number
 
 function checkExists(dir,stats) {
     if (!dirs[dir]) dirs[dir] = {files: [], mtime: stats ? stats.mtime.getTime() : Date.now()};
@@ -1177,7 +1171,7 @@ function filesUpdate(eventType, event, dir) {
 
     if (event === "unlinkDir") {
         delete dirs[dir];
-        updateClients(parentDir);
+        updateCache(parentDir);
     } else if (event === "unlink") {
         if (dirs[parentDir]) {
             dirs[parentDir].files.some(function (file, i) {
@@ -1187,7 +1181,7 @@ function filesUpdate(eventType, event, dir) {
                 }
             });
         }
-        updateClients(parentDir);
+        updateCache(parentDir);
     } else if (event === "add") {
         fs.stat(utils.addFilesPath(dir), function (err, stats) {
             checkExists(parentDir, stats);
@@ -1196,7 +1190,7 @@ function filesUpdate(eventType, event, dir) {
                 size: stats.size,
                 mtime: stats.mtime.getTime() || 0
             });
-            updateClients(parentDir);
+            updateCache(parentDir);
         });
     } else if (event === "addDir") {
         fs.stat(utils.addFilesPath(dir), function (err, stats) {
@@ -1206,7 +1200,7 @@ function filesUpdate(eventType, event, dir) {
                 size: 0,
                 mtime: stats.mtime.getTime() || 0
             };
-            updateClients(parentDir);
+            updateCache(parentDir);
         });
     } else if (event === "change") {
         fs.stat(utils.addFilesPath(dir), function (err, stats) {
@@ -1215,7 +1209,7 @@ function filesUpdate(eventType, event, dir) {
                 if (file.name === entryName) {
                     dirs[parentDir].files[i].size = stats.size;
                     dirs[parentDir].files[i].mtime = stats.mtime.getTime() || 0;
-                    updateClients(parentDir);
+                    updateCache(parentDir);
                     return true;
                 }
             });
@@ -1223,19 +1217,31 @@ function filesUpdate(eventType, event, dir) {
     }
 }
 
-function updateClients(dir) {
-    if (!dirs[dir]) return;           // sometimes happens on recursive unlinks
-    if (!clientsPerDir[dir]) return;  // clients never seen these
-
-    clientsPerDir[dir].forEach(function (client) {
-        client.update();
-    });
-
-    debouncedUpdateDirectory(dir);  // read the dir for folder size updates
+function updateCache(dir) {
+    if (!dirs[dir]) return; // sometimes happens on recursive unlinks
+    debouncedUpdateDirectory(dir); // read the dir for folder size updates
 }
 
+function updateClients(dir) {
+    if (clientsPerDir[dir]) {
+        clientsPerDir[dir].forEach(function (client) {
+            client.update();
+        });
+    }
 
-function updateClientsPerDir(dir, sid, vId) {
+    var parent = dir;
+    while (true) {
+        parent = path.dirname(parent);
+        if (clientsPerDir[parent]) {
+            clientsPerDir[parent].forEach(function (client) {
+                client.update();
+            });
+        }
+        if (parent === "/") break;
+    }
+}
+
+function updateClientLocation(dir, sid, vId) {
     // remove current client from any previous dirs
     removeClientPerDir(sid, vId);
 
@@ -1319,7 +1325,6 @@ function cleanupLinks(callback) {
         });
     }
 }
-
 
 //-----------------------------------------------------------------------------
 // Create a zip file from a directory and stream it to a client

@@ -454,6 +454,9 @@
                 droppy.themes.pop();
                 droppy.themes.unshift("droppy");
 
+                // Insert plain mode on the top
+                droppy.modes.unshift("plain");
+
                 if (droppy.demoMode || droppy.public)
                     $("#logout-button").addClass("disabled").attr("title", "Signing out is disabled.");
                 else
@@ -592,13 +595,14 @@
                     addKey([37, 38], function () { swapMedia(view, "left");  });
                     addKey([39, 40], function () { swapMedia(view, "right"); });
                     view.find(".fs").html(droppy.svg.unfullscreen);
+                    view.find(".full svg").replaceWith(droppy.svg.unfullscreen);
                 } else {
                     removeKey([32, 37, 38, 39, 40]);
                     $(".fs").html(droppy.svg.fullscreen);
+                    $(".full svg").replaceWith(droppy.svg.fullscreen);
                 }
             });
         });
-
 
         if ("MutationObserver" in window) {
             new MutationObserver(function(mutations) {
@@ -2060,12 +2064,9 @@
 
     function openDoc(view, entryId) {
         showSpinner(view);
+        var editor, doc = $(droppy.templates.views.document({modes: droppy.modes}));
         view.data("type", "document");
         view[0].animDirection = "forward";
-
-        var editor,
-            readOnly = false, // Check if not readonly
-            doc      = $(droppy.templates.views.document({readOnly: readOnly}));
 
         $.ajax({
             type: "GET",
@@ -2082,9 +2083,6 @@
         });
 
         function loadCM(data, filename) {
-            // Disable New-Tab browser shortcut in keymap
-            CodeMirror.keyMap.sublime[droppy.detects.mac ? "Cmd-T" : "Ctrl-T"] = false;
-
             loadContent(view, contentWrap(view).append(doc), function () {
                 view[0].editorEntryId = entryId;
                 view[0].editor = editor = CodeMirror(doc.find(".text-editor")[0], {
@@ -2095,7 +2093,6 @@
                     keyMap: "sublime",
                     lineNumbers: true,
                     lineWrapping: droppy.get("lineWrapping"),
-                    readOnly: readOnly,
                     showCursorWhenSelecting: true,
                     styleSelectedText: true,
                     styleActiveLine: true,
@@ -2118,6 +2115,28 @@
                     editor.setOption("lineWrapping", !editor.options.lineWrapping);
                     droppy.set("lineWrapping", !editor.options.lineWrapping);
                 });
+                doc.find(".syntax").register("click", function () {
+                    var shown = view.find(".mode-select").toggleClass("in").hasClass("in");
+                    var action = shown ? "addClass" : "removeClass";
+                    view.find(".syntax")[action]("in");
+                    view.find(".mode-select").on("change", function () {
+                        var mode = $(this).val();
+                        CodeMirror.autoLoadMode(editor, mode);
+                        editor.setOption("mode", mode);
+                        view.find(".syntax").removeClass("in");
+                        view.find(".mode-select").removeClass("in");
+                    });
+                });
+                doc.find(".find").register("click", function () {
+                    CodeMirror.commands.find(editor);
+                    view.find(".CodeMirror-search-field").eq(0).focus();
+                });
+                doc.find(".full").register("click", function () {
+                    toggleFullscreen($(this).parents(".content")[0]);
+                });
+
+                // Disable New-Tab browser shortcut in keymap
+                CodeMirror.keyMap.sublime[droppy.detects.mac ? "Cmd-T" : "Ctrl-T"] = false;
 
                 var called = false;
                 view.find(".content").end(function () {
@@ -2130,6 +2149,9 @@
                     if (modeInfo) {
                         CodeMirror.autoLoadMode(editor, modeInfo.mode);
                         editor.setOption("mode", modeInfo.mode);
+                        view.find(".mode-select").val(modeInfo.mode);
+                    } else {
+                        view.find(".mode-select").val("plain");
                     }
 
                     editor.on("change", function (cm, change) {
@@ -2195,8 +2217,6 @@
                 });
             });
         }
-        // Transform the select box, width is needed for the dropdown to behave correctly
-        $("#prefs-box select").width($(".list-prefs li").eq(0).width() * 0.6).customSelect();
     }
 
     function showPrefs() {
@@ -2226,8 +2246,8 @@
         toggleCatcher();
         $("#click-catcher").one("click", function () {
             box.find("select").each(function () {
-                var option = $(this).attr("class").replace(" hasCustomSelect", ""),
-                    value = $(this).val();
+                var option = $(this).attr("class"),
+                    value  = $(this).val();
 
                 if (value === "true") value = true;
                 else if (value === "false") value = false;
@@ -2709,7 +2729,6 @@
                     '<span class="header-spacer"></span>' +
                 '</div>';
     }
-
 
     function fullScreenElement() {
         var el;
