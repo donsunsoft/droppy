@@ -462,7 +462,7 @@ function setupSocket(server) {
                 break;
             case "UPDATE_USER":
                 var name = msg.data.name, pass = msg.data.pass;
-                if (!db.get("sessions")[sid].privileged) return;
+                if (!db.get("sessions")[cookie].privileged) return;
                 if (pass === "") {
                     if (!db.get("users")[name]) return;
                     db.delUser(msg.data.name, function () {
@@ -479,7 +479,7 @@ function setupSocket(server) {
                         sendUsers(sid);
                     });
                 }
-                if (db.get("sessions")[sid].privileged) sendUsers(sid);
+                if (db.get("sessions")[cookie].privileged) sendUsers(sid);
                 break;
             case "CREATE_FILES":
                 var files = Array.isArray(msg.data.files) ? msg.data.files : [msg.data.files];
@@ -645,18 +645,7 @@ function handleGET(req, res) {
     if (config.public && !cookies.get(req.headers.cookie))
         cookies.free(req, res);
 
-    if (/^\/\?!\/content/.test(URI)) {
-        if (cookies.get(req.headers.cookie) || config.public) {
-            res.setHeader("X-Page-Type", "main");
-            handleResourceRequest(req, res, "main.html");
-        } else if (firstRun) {
-            res.setHeader("X-Page-Type", "firstrun");
-            handleResourceRequest(req, res, "auth.html");
-        } else {
-            res.setHeader("X-Page-Type", "auth");
-            handleResourceRequest(req, res, "auth.html");
-        }
-    } else if (/^\/\?!\//.test(URI)) {
+    if (/^\/\?!\//.test(URI)) {
         handleResourceRequest(req, res, (/\?!\/([\s\S]+)$/.exec(URI)[1]));
     } else if (/^\/\?[~\$]\//.test(URI)) {
         handleFileRequest(req, res, true);
@@ -669,7 +658,13 @@ function handleGET(req, res) {
     } else if (/^\/favicon.ico$/.test(URI)) {
         handleResourceRequest(req, res, "favicon.ico");
     } else {
-        handleResourceRequest(req, res, "base.html");
+        if (cookies.get(req.headers.cookie) || config.public) {
+            handleResourceRequest(req, res, "main.html");
+        } else if (firstRun) {
+            handleResourceRequest(req, res, "firstrun.html");
+        } else {
+            handleResourceRequest(req, res, "auth.html");
+        }
     }
 }
 
@@ -772,7 +767,7 @@ function handleResourceRequest(req, res, resourceName) {
         } else {
             var headers = {}, status = 200;
 
-            if (req.url === "/" || /\?\!\/content/.test(req.url)) {
+            if (/\.html$/.test(resourceName)) {
                 if (!config.debug)
                     headers["X-Frame-Options"] = "DENY";
                 if (req.headers["user-agent"] && req.headers["user-agent"].indexOf("MSIE") > 0)
@@ -780,15 +775,14 @@ function handleResourceRequest(req, res, resourceName) {
             }
 
             if (/.+\.(png|ico|svg|woff)$/.test(resourceName)) {
-                headers["Cache-Control"] = "public, max-age=604800";
-                headers["Expires"] = new Date(Date.now() + 604800000).toUTCString();
+                headers["Cache-Control"] = "public, max-age=86400";
+                headers["Expires"] = new Date(Date.now() + 86400000).toUTCString();
             } else {
+                if (resource.etag && !/\.html$/.test(resourceName)) {
+                    headers["ETag"] = '"' + resource.etag + '"';
+                }
                 headers["Cache-Control"] = "private, max-age=0";
                 headers["Expires"] = "0";
-            }
-
-            if (resource.etag && !/\?\!\/content/.test(req.url)) {
-                headers["ETag"] = '"' + resource.etag + '"';
             }
 
             // Content-Type
@@ -1077,77 +1071,55 @@ function getDirContents(p) {
 function updateDirectory(dir, initial, cb) {
     log.debug("Updating " + chalk.blue(dir));
     fs.stat(utils.addFilesPath(dir), function (err, stats) {
-       readdirp({root: utils.addFilesPath(dir)}, function (errors, results) {
-           dirs[dir] = {files: [], mtime: stats ? stats.mtime.getTime() : Date.now()};
-           if (errors) {
-               errors.forEach(function (err) {
-                   if (err.code === "ENOENT" && dirs[utils.removeFilesPath(err.path)]) {
-                       // "unlinkDir" can happen out of order
-                       delete dirs[utils.removeFilesPath(err.path)];
-                   } else {
-                       log.error(err);
-                   }
-               });
-               if (cb) cb();
-               if (!initial) return;
-           }
+        readdirp({root: utils.addFilesPath(dir)}, function (errors, results) {
+            dirs[dir] = {files: [], size: 0, mtime: stats ? stats.mtime.getTime() : Date.now()};
+            if (errors) {
+                errors.forEach(function (err) {
+                    if (err.code === "ENOENT" && dirs[utils.removeFilesPath(err.path)]) {
+                        // "unlinkDir" can happen out of order
+                        delete dirs[utils.removeFilesPath(err.path)];
+                    } else {
+                        log.error(err);
+                    }
+                });
+                if (cb) cb();
+                if (!initial) return;
+            }
 
-           // Add directories
-           results.directories.forEach(function (d) {
-               dirs[utils.removeFilesPath(d.fullPath)] = {
-                   files: [],
-                   size: 0,
-                   mtime: d.stat.mtime.getTime() || 0
-               };
-           });
-
-           // Add files
-           results.files.forEach(function (file) {
-               dirs[utils.removeFilesPath(file.fullParentDir)].files.push({
-                   name: file.name,
-                   size: file.stat.size,
-                   mtime: file.stat.mtime.getTime() || 0
-               });
-           });
-
-           // Calculate folder sizes
-           var folders = Object.keys(dirs);
-           folders.splice(0, 1); // We don't care about the size of '/'
-
-           var folderPaths = folders.map(function(folder) {
-               return utils.addFilesPath(folder);
-           });
-
-           async.map(folderPaths, du, function (err, results) {
-               results.forEach(function (result, i) {
-                   dirs[folders[i]].size = results[i];
-               });
-               if (cb) cb();
-           });
-       });
-    });
-}
-
-var debouncedUpdateDirectory = _.debounce(function(dir) {
-    updateDirectory(dir, false, function () {
-        updateClients(dir);
-    });
-}, 500); // TODO: magic number
-
-// -----------------------------------------------------------------------------
-//  Get a directory's size (the sum of all files inside it)
-function du(dir, callback) {
-    fs.stat(dir, function (error, stat) {
-        if (error || !stat) return callback(null, 0);
-        if (!stat.isDirectory()) return callback(null, stat.size);
-        fs.readdir(dir, function (error, files) {
-            if (error || !files || files.length === 0) return callback(null, 0);
-            files = files.map(function (file) { return path.join(dir, file); });
-            async.map(files, du, function (error, sizes) {
-                callback(error, sizes && sizes.reduce(function (p, s) {
-                    return p + s;
-                }, stat.size));
+            // Add directories
+            results.directories.forEach(function (d) {
+                dirs[utils.removeFilesPath(d.fullPath)] = {
+                    files: [],
+                    size: 0,
+                    mtime: d.stat.mtime.getTime() || 0
+                };
             });
+
+            // Add files
+            results.files.forEach(function (f) {
+                var filedir = utils.removeFilesPath(f.fullParentDir);
+                dirs[filedir].files.push({
+                    name: f.name,
+                    size: f.stat.size,
+                    mtime: f.stat.mtime.getTime() || 0
+                });
+                dirs[filedir].size += f.stat.size;
+            });
+
+            // Calculate folder sizes
+            var subdirs = [];
+            Object.keys(dirs).forEach(function (d) {
+                if (d.indexOf(dir) === 0 && d !== dir) subdirs.push(d);
+            });
+
+            subdirs.sort(function (a, b) {
+                return -(a.match(/\//g).length - b.match(/\//g).length);
+            }).forEach(function (d) {
+                if (path.dirname(d) !== "/")
+                    dirs[path.dirname(d)].size += dirs[d].size;
+            });
+
+            if (cb) cb();
         });
     });
 }
@@ -1158,7 +1130,7 @@ function checkExists(dir,stats) {
 
 //-----------------------------------------------------------------------------
 // Watcher callback for files, event = "addDir" || "unlinkDir" || "add" || "unlink" || "change"
-function filesUpdate(eventType, event, dir) {
+function filesUpdate(event, dir) {
     dir = utils.normalizePath(dir);            // Remove OS inconsistencies
     dir = (dir === ".") ? "/" : "/" + dir;     // Prefix "/"
 
@@ -1217,9 +1189,27 @@ function filesUpdate(eventType, event, dir) {
     }
 }
 
+var todoDirs = [];
+var debouncedUpdate = _.debounce(function() {
+    todoDirs.sort(function (a, b) {
+      return a.match(/\//g).length - b.match(/\//g).length;
+    }).filter(function (path, index, self) {
+      return self.every(function (another) {
+         return another === path || path.indexOf(another + "/") !== 0;
+      });
+    }).filter(function (path, index, self) {
+      return self.indexOf(path) === index;
+    }).forEach(function (dir) {
+        updateDirectory(dir, false, updateClients.bind(null, dir));
+    });
+    todoDirs = [];
+}, 250, {trailing: true});
+
+
 function updateCache(dir) {
     if (!dirs[dir]) return; // sometimes happens on recursive unlinks
-    debouncedUpdateDirectory(dir); // read the dir for folder size updates
+    todoDirs.push(dir);
+    debouncedUpdate(); // read the dir for folder size updates
 }
 
 function updateClients(dir) {
@@ -1232,6 +1222,7 @@ function updateClients(dir) {
     var parent = dir;
     while (true) {
         parent = path.dirname(parent);
+        if (parent === dir) return;
         if (clientsPerDir[parent]) {
             clientsPerDir[parent].forEach(function (client) {
                 client.update();

@@ -1,5 +1,4 @@
-/*global CodeMirror, prettyBytes, videojs, Draggabilly */
-
+/* global jQuery, CodeMirror, prettyBytes, videojs */
 (function ($, window, document) {
     "use strict";
     var droppy = {};
@@ -40,24 +39,11 @@
             });
             return types;
         })(),
-        webp: (function () {
-            var img = new Image();
-            img.onload = img.onerror = function () {
-                if (img.height === 2) droppy.imageTypes.webp = "image/webp";
-            };
-            img.src = "data:image/webp;base64,UklGRi4AAABXRUJQVlA4TCEAAAAvAUAAEB8wAiMwAgSSNtse/cXjxyCCmrYNWPwmHRH9jwMA";
-        })(),
-        notification: (function () {
-            return "Notification" in window;
-        })(),
-        mobile: (function () {
-            return (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i).test(navigator.userAgent);
-        })(),
-        mac: (function () {
-            return /Mac/.test(navigator.platform);
-        })()
+        webp: document.createElement("canvas").toDataURL("image/webp").indexOf("data:image/webp") === 0,
+        notification: "Notification" in window,
+        mobile: (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i).test(navigator.userAgent),
+        mac: /Mac/.test(navigator.platform)
     };
-
 // ============================================================================
 //  Set up a few more things
 // ============================================================================
@@ -161,17 +147,12 @@
                function (callback) { setTimeout(callback, 1000 / 60); };
     })();
 
-    // Add certain classes to the html tag based on UA
-    if (navigator.userAgent.toLowerCase().indexOf("firefox") > -1)
-        $("html").addClass("firefox"); // https://bugzilla.mozilla.org/show_bug.cgi?id=878058
-    else if (navigator.userAgent.toLowerCase().indexOf("msie") > -1)
-        $("html").addClass("ie");
-
     if (droppy.detects.mobile)
         $("html").addClass("mobile");
     if (!droppy.detects.fullscreen)
         $("html").addClass("nofullscreen");
-
+    if (droppy.detects.webp)
+        droppy.imageTypes.webp = "image/webp";
 // ============================================================================
 //  localStorage wrapper functions
 // ============================================================================
@@ -180,6 +161,7 @@
             volume : 0.5,
             videoVolume : 0.5,
             theme: "droppy",
+            editorFontSize: 16,
             indentWithTabs : false,
             indentUnit : 4,
             lineWrapping: false,
@@ -209,6 +191,30 @@
         };
     });
 // ============================================================================
+//  Page load
+// ============================================================================
+    $(function () {
+        var type = $("html").data("type");
+        if (type === "main") {
+            initMainPage();
+            raf(function () {
+                $("#navigation").setTransitionClass("in");
+            });
+        } else {
+            initAuthPage(type === "firstrun");
+            raf(function () {
+               $("#login-box").setTransitionClass("in");
+               $("#login-info-box").addClass("info");
+               if (type === "firstrun") {
+                   $("#login-info").text("Hello! Choose your credentials.");
+               } else if (droppy.get("hasLoggedOut")) {
+                   $("#login-info").text("Logged out!");
+                   droppy.set("hasLoggedOut", false);
+               }
+            });
+        }
+    });
+// ============================================================================
 //  View handling
 // ============================================================================
     function getView(id) {
@@ -232,10 +238,10 @@
                         "<ul class='path'></ul>" +
                         "<div class='content-container'><div class='content'></div></div>" +
                         "<div class='dropzone'></div>" +
-                        "<div class='info-box'><div class='box-icon'><svg></svg></div><span><input></span></div>" +
+                        "<div class='info-box'><svg></svg><span></span><div class='linkout' contenteditable></div></div>" +
                         "<div class='audio-bar out'>" +
                           "<div class='audio-icon volume'>" + droppy.svg["volume-medium"] + "</div>" +
-                          "<div class='volume-slider out'>" +
+                          "<div class='volume-slider'>" +
                             "<div class='volume-slider-inner'></div>" +
                           "</div>" +
                           "<div class='audio-icon previous'>" + droppy.svg.previous + "</div>" +
@@ -246,7 +252,7 @@
                           "<div class='audio-title'></div>" +
                           "<div class='time'>" +
                             "<span class='time-cur'></span>" +
-                            "<span> / </span>" +
+                            "<span class='time-sep'> / </span>" +
                             "<span class='time-max'></span>" +
                           "</div>" +
                           "<div class='seekbar'>" +
@@ -274,61 +280,8 @@
     function contentWrap(view) {
         return $('<div class="new content ' + view[0].animDirection + '"></div>');
     }
-
 // ============================================================================
-//  Page loading functions
-// ============================================================================
-    $(getPage);
-
-    // Load HTML and replace SVG placeholders
-    function getPage() {
-        $.get("?!/content").then(function (data, textStatus, xhr) {
-            loadPage(xhr.getResponseHeader("X-Page-Type"), prepareSVG(data));
-        });
-    }
-
-    // Switch the page content with an animation
-    function loadPage(type, data) {
-        var newPage, oldPage;
-        $("body").append('<div id="newpage">' + data + '</div>');
-        newPage = $("#newpage");
-        oldPage = $("#page");
-        if (type === "main") {
-            initMainPage();
-            initEntryMenu();
-            raf(function () {
-                oldPage.replaceClass("in", "out").end(function () {
-                    $("#navigation").removeAttr("class"); // remove out class
-                });
-                finalize();
-            });
-        } else if (type === "auth" || type === "firstrun") {
-            initAuthPage(type === "firstrun");
-            raf(function () {
-                oldPage.replaceClass("in", "out").end(function () {
-                    $("#login-box").replaceClass("out", "in"); // remove out class
-                });
-                if (type === "firstrun") {
-                    $("#login-info").text("Hello! Choose your creditentials.");
-                    $("#login-info-box").addClass("info");
-                } else if (droppy.get("hasLoggedOut")) {
-                    $("#login-info").text("Logged out!");
-                    $("#login-info-box").addClass("info");
-                    droppy.set("hasLoggedOut", false);
-                }
-                finalize();
-            });
-        }
-
-        // Switch ID of #newpage for further animation
-        function finalize() {
-            oldPage.remove();
-            newPage.attr("id", "page");
-        }
-    }
-
-// ============================================================================
-//  WebSocket functions
+//  WebSocket handling
 // ============================================================================
     var retries = 5, retryTimeout = 4000;
     function openSocket() {
@@ -338,7 +291,6 @@
             retries = 5; // reset retries on connection loss
             // Request settings when droppy.debug is uninitialized, could use another variable too.
             if (droppy.debug === null) droppy.socket.send(JSON.stringify({type: "REQUEST_SETTINGS"}));
-            else if (droppy.debug) location.reload(); // if in debug mode reload to see changes to client.js
             if (droppy.queuedData)
                 sendMessage();
             else {
@@ -422,7 +374,7 @@
                 } else window.location.reload(true);
                 break;
             case "SHARELINK":
-                showLinkBox(getView(vId), msg.link);
+                showLink(getView(vId), msg.link);
                 toggleCatcher();
                 break;
             case "USER_LIST":
@@ -527,8 +479,6 @@
     function initAuthPage(firstrun) {
         var form = $("#form");
 
-        $("#user").focus();
-
         $("#pass").register("keydown", function (event) {
             if (event.keyCode === 13) form.submit();
         });
@@ -577,7 +527,7 @@
             // Bind escape for hiding modals
             .register("keydown", function (event) {
                 if (event.keyCode === 27)
-                    $("#click-catcher").click();
+                    toggleCatcher(false);
             })
             // Stop CTRL-S from showing a save dialog
             .register("keydown", function (event) {
@@ -603,17 +553,6 @@
                 }
             });
         });
-
-        if ("MutationObserver" in window) {
-            new MutationObserver(function(mutations) {
-                mutations.forEach(function(mutation) {
-                    if (mutation.attributeName === "class") {
-                        var action = $("#click-catcher").hasClass("in") ? "addClass" : "removeClass";
-                        $("#navigation, .path, .content-container, .audio-bar")[action]("blur");
-                    }
-                });
-            }).observe(document.querySelector("#click-catcher"), {attributes: true});
-        }
 
         var fileInput = $("#file");
         fileInput.register("change", function (event) {
@@ -664,29 +603,29 @@
         } else {
             // No directory upload support - disable the button
             $("#upload-folder-button").addClass("disabled").on("click", function () {
-                showError(getView(0), "Sorry, your browser doesn't support directory uploading yet!");
+                showError(getView(0), "Sorry, your browser doesn't support directory uploading.");
             });
         }
 
         $("#create-folder-button").register("click", function () {
             var dummyFolder, wasEmpty,
                 view      = getView(), // TODO: Create folder in last active view
-                dummyHtml = '<li class="data-row new-folder" data-type="folder">' +
+                dummyHtml = '<div class="data-row new-folder" data-type="folder">' +
                                 '<span class="sprite sprite-folder"></span>' +
                                 '<a class="folder-link entry-link"></a>' +
-                            '</li>';
+                            '</div>';
 
             if (view.find(".empty").length > 0) {
-                view.find(".content").html("<ul>" + getHeaderHTML() + dummyHtml + "</ul>");
+                view.find(".content").html(getHeaderHTML() + dummyHtml);
                 wasEmpty = true;
             } else {
-                view.find(".content ul").prepend(dummyHtml);
+                view.find(".content").prepend(dummyHtml);
             }
             dummyFolder = $(".data-row.new-folder");
             view.find(".content").scrollTop(0);
             entryRename(view, dummyFolder, wasEmpty, function (success, oldVal, newVal) {
                 if (success) {
-                    showSpinner(view);
+                    if (view.data("type") === "directory") showSpinner(view);
                     sendMessage(view[0].vId, "CREATE_FOLDER", newVal);
                 }
                 dummyFolder.remove();
@@ -696,22 +635,22 @@
         $("#create-file-button").register("click", function () {
             var dummyFile, wasEmpty,
                 view      = getView(), // TODO: Create folder in last active view
-                dummyHtml = '<li class="data-row new-file" data-type="file">' +
-                                '<span class="sprite sprite-default"></span>' +
-                                '<a class="file-link entry-link"></a>' +
-                            '</li>';
+                dummyHtml = '<div class="data-row new-file" data-type="file">' +
+                                '<span class="sprite sprite-text"></span>' +
+                                '<a class="file-link entry-link">.txt</a>' +
+                            '</div>';
 
             if (view.find(".empty").length > 0) {
-                view.find(".content").html("<ul>" + getHeaderHTML() + dummyHtml + "</ul>");
+                view.find(".content").html(getHeaderHTML() + dummyHtml);
                 wasEmpty = true;
             } else {
-                view.find(".content ul").prepend(dummyHtml);
+                view.find(".content").prepend(dummyHtml);
             }
             dummyFile = $(".data-row.new-file");
             view.find(".content").scrollTop(0);
             entryRename(view, dummyFile, wasEmpty, function (success, oldVal, newVal) {
                 if (success) {
-                    showSpinner(view);
+                    if (view.data("type") === "directory") showSpinner(view);
                     sendMessage(view[0].vId, "CREATE_FILE", newVal);
                 }
                 dummyFile.remove();
@@ -749,26 +688,15 @@
         };
 
         $("#about-button").register("click", function () {
-            raf(function () {
-                $("#about-box").attr("class", $("#about-box").attr("class") !== "in" ? "in" : "out");
-                toggleCatcher();
-            });
+            $("#about-box").addClass("in");
+            toggleCatcher();
         });
 
         $("#prefs-button").register("click", function () {
             showPrefs();
             sendMessage(null, "GET_USERS");
         });
-
-        // Hide modals when clicking outside their box
-        $("#click-catcher").register("click", function () {
-            $("#prefs-box").replaceClass("in", "out");
-            $("#about-box").replaceClass("in", "out");
-            $("#entry-menu").replaceClass("in", "out");
-            $("#drop-select").removeAttr("class");
-            $(".info-box").replaceClass("in", "out");
-            toggleCatcher();
-        });
+        initEntryMenu();
     }
     // ============================================================================
     //  Upload functions
@@ -840,6 +768,7 @@
             if (xhr.status === 200) {
                 uploadDone(view);
             } else {
+                if (xhr.status === 0) return; // cancelled by user
                 showError(view, "Server responded with HTTP " + xhr.status);
                 uploadCancel(view);
             }
@@ -870,7 +799,7 @@
 
         function isOverLimit(view, size) {
             if (droppy.maxFileSize > 0 && size > droppy.maxFileSize) {
-                showError(view, "Maximum file size for uploads is " + prettyBytes(droppy.maxFileSize));
+                showError(view, "Maximum file size for uploads is " + prettyBytes(droppy.maxFileSize) + ".");
                 uploadCancel(view);
                 return true;
             }
@@ -889,7 +818,7 @@
     }
 
     function uploadInit(view) {
-        var uploadInfo = '<div class="upload-info out">' +
+        var uploadInfo = '<div class="upload-info">' +
                 '<div class="upload-bar"></div>' +
                 '<span class="upload-title"></span>' +
                 '<span class="upload-speed">' +
@@ -907,7 +836,7 @@
             '</div>';
 
         if (!view.find(".upload-info").length) view.append(uploadInfo);
-        view.find(".upload-info").setTransitionClass("out", "in");
+        view.find(".upload-info").setTransitionClass("in");
         view.find(".upload-bar").css("width", "0%");
         view.find(".upload-time-left, .upload-speed > span").text("");
         view.find(".upload-title").text("Reading files ...");
@@ -929,7 +858,7 @@
         view[0].isUploading = false;
         hideSpinner(view);
         updateTitle(basename(view[0].currentFolder));
-        view.find(".upload-info").setTransitionClass("in", "out");
+        view.find(".upload-info").removeClass("in");
         view.find(".data-row.uploading").removeClass("uploading");
         view.find(".icon-uploading").remove();
         if (view[0].uploadSuccess) {
@@ -982,7 +911,7 @@
         });
 
         // Hide menu, click-catcher and the original link, stop any previous edits
-        $("#click-catcher").trigger("mousemove");
+        toggleCatcher(false);
         link = entry.find(".entry-link");
 
         // Add inline elements
@@ -998,11 +927,7 @@
                 if (file === (droppy.caseSensitive ? inputText : inputText.toLowerCase())) return true;
             });
             canSubmit = valid && (!exists || inputText === namer.attr("placeholder"));
-            // TODO: Better indicator of what's wrong
-            if (!canSubmit)
-                entry.addClass("invalid");
-            else
-                entry.removeClass("invalid");
+            entry[canSubmit ? "removeClass" : "addClass"]("invalid");
         }).register("keydown", function (event) {
             if (event.keyCode === 27) stopEdit(view); // Escape Key
             if (event.keyCode === 13) submitEdit(view, false, callback); // Return Key
@@ -1046,18 +971,23 @@
         }
     }
 
-    // Toggle the full-screen click catching frame if any modals are shown
-    function toggleCatcher() {
-        if ($("#about-box").hasClass("in") ||
-            $("#prefs-box").hasClass("in") ||
-            $(".info-box").hasClass("in") ||
-            $("#entry-menu").hasClass("in") ||
-            $("#drop-select").hasClass("in")
-        ) {
-            $("#click-catcher").attr("class", "in");
-        } else {
-            $("#click-catcher").attr("class", "out");
-        }
+    function toggleCatcher(show) {
+        var cc     = $("#click-catcher"),
+            modals = ["#prefs-box", "#about-box", "#entry-menu", "#drop-select", ".info-box"],
+            toBlur = ["#navigation", ".path", ".content-container", ".audio-bar"];
+
+        if (show === undefined)
+            show = modals.some(function (selector) { return $(selector).hasClass("in"); });
+
+        toBlur.forEach(function (selector) {
+            $(selector)[show ? "addClass" : "removeClass"]("blur");
+        });
+
+        if (!show)
+            modals.forEach(function (selector) { $(selector)[show ? "addClass" : "removeClass"]("in"); });
+
+        cc.register("click", toggleCatcher.bind(null, false));
+        cc[show ? "addClass" : "removeClass"]("in");
     }
 
     // Update the page title
@@ -1128,14 +1058,14 @@
                     var viewLoc = getViewLocation(view);
                     showSpinner(view);
                     // Find the direction in which we should animate
-                    if (!viewLoc)
+                    if (!viewLoc || viewDest.length === viewLoc.length)
                         view[0].animDirection = "center";
                     else if (viewDest.length > viewLoc.length)
                         view[0].animDirection = "forward";
-                    else if (viewDest.length === viewLoc.length)
-                        view[0].animDirection = "center";
                     else
                         view[0].animDirection = "back";
+
+                    view.find(".content")[0].style.willChange = "transform";
                     sendMessage(view[0].vId, "REQUEST_UPDATE", viewDest);
 
                     // Skip the push if we're already navigating through history
@@ -1191,7 +1121,7 @@
         view[0].savedParts = parts;
 
         function addPart(name, path) {
-            var li = $("<li class='out'><a>" + name + "</a></li>");
+            var li = $("<li><a>" + name + "</a></li>");
             li.data("destination", path);
             li.register("click", function (event) {
                 var view = $(event.target).parents(".view");
@@ -1212,13 +1142,13 @@
 
         function removePart(i) {
             var toRemove = view.find(".path li").slice(i);
-            toRemove.setTransitionClass("in", "out gone").end(function () {
+            toRemove.setTransitionClass("in", "gone").end(function () {
                 $(this).remove();
             });
         }
 
         function finalize() {
-            view.find(".path li.out:not(.gone)").setTransitionClass("out", "in");
+            view.find(".path li:not(.gone)").setTransitionClass("in");
             setTimeout(function () {checkPathOverflow(view); }, 400);
         }
     }
@@ -1302,7 +1232,7 @@
             else
                 targetRow = target.parents(".data-row");
             if (targetRow.data("type") === "error") return;
-            showEntryMenu(targetRow, event.clientX);
+            showEntryMenu(targetRow, event.clientX, event.clientY);
             event.preventDefault();
             event.stopPropagation();
         });
@@ -1364,6 +1294,7 @@
             finish();
         } else {
             view.children(".content-container").append(content);
+            view.find(".content")[0].style.willChange = "transform";
             view.find(".new").data("root", view[0].currentFolder);
             view[0].isAnimating = true;
             view.find(".data-row").addClass("animating");
@@ -1376,6 +1307,7 @@
         function finish() {
             view[0].isAnimating = false;
             view.find(".content:not(.new)").remove();
+            view.find(".content")[0].style.willChange = "auto";
             view.find(".new").removeClass("new");
             view.find(".data-row").removeClass("animating");
             if (view.data("type") === "directory") {
@@ -1391,8 +1323,7 @@
     }
 
     function handleDrop(view, event, from, to, spinner) {
-        var catcher = $("#click-catcher"),
-            dropSelect = $("#drop-select");
+        var dropSelect = $("#drop-select");
         droppy.dragTimer.clear();
         $(".drop-hover").removeClass("drop-hover");
         $(".dropzone").removeClass("in");
@@ -1405,31 +1336,34 @@
         } else if (dragAction === "cut" || event.shiftKey) {
             sendDrop(view, "cut", from, to, spinner);
         } else {
+            var x = event.originalEvent.clientX;
+            var y = event.originalEvent.clientY;
+
             // Keep the drop-select in view
             var limit = dropSelect[0].offsetWidth / 2 - 20, left;
-            if (event.originalEvent.clientX < limit)
-                left = event.originalEvent.clientX + limit;
-            else if ((event.originalEvent.clientX + limit) > window.innerWidth)
-                left = event.originalEvent.clientX - limit;
+            if (x < limit)
+                left = x + limit;
+            else if (x + limit > window.innerWidth)
+                left = x - limit;
             else
-                left = event.originalEvent.clientX;
+                left = x;
 
-            dropSelect.attr("class", "in").css({
-                left: left,
-                top:  event.originalEvent.clientY
+            dropSelect.css({left: left, top: event.originalEvent.clientY}).addClass("in");
+            $(document.elementFromPoint(x, y)).addClass("active").one("mouseleave", function () {
+                $(this).removeClass("active");
             });
-            toggleCatcher();
+            toggleCatcher(true);
             dropSelect.children(".movefile").off("click").one("click", function () {
                 sendDrop(view, "cut", from, to, spinner);
-                catcher.off("mousemove").trigger("click");
+                toggleCatcher(false);
             });
             dropSelect.children(".copyfile").off("click").one("click", function () {
                 sendDrop(view, "copy", from, to, spinner);
-                catcher.off("mousemove").trigger("click");
+                toggleCatcher(false);
             });
             dropSelect.children(".viewfile").off("click").one("click", function () {
                 updateLocation(view, from);
-                catcher.off("mousemove").trigger("click");
+                toggleCatcher(false);
             });
             return;
         }
@@ -1688,7 +1622,7 @@
 
             event.stopPropagation();
             play(view, entry.data("id"));
-            $("#click-catcher").trigger("click");
+            toggleCatcher(false);
         });
 
         $("#entry-menu .edit").register("click", function (event) {
@@ -1696,8 +1630,7 @@
                 entry = $("#entry-menu").data("target"),
                 view  = entry.parents(".view");
 
-            $("#click-catcher").trigger("click");
-
+            toggleCatcher(false);
             view[0].currentFile = entry.find(".file-link").text();
             location = join(view[0].currentFolder, view[0].currentFile);
             pushHistory(view, location);
@@ -1710,8 +1643,12 @@
         $("#entry-menu .openfile").register("click", function (event) {
             var entry  = $("#entry-menu").data("target"),
                 view   = entry.parents(".view");
-            $("#click-catcher").trigger("click");
-            openFile(view, view[0].currentFolder, entry.find(".file-link").text());
+
+            toggleCatcher(false);
+            if (entry.data("type") === "folder")
+                updateLocation(view, entry.data("id"));
+            else
+                openFile(view, view[0].currentFolder, entry.find(".file-link").text());
             event.stopPropagation();
         });
 
@@ -1720,7 +1657,8 @@
             var entry = $("#entry-menu").data("target"),
                 view  = entry.parents(".view");
             if (droppy.socketWait) return;
-            $("#click-catcher").trigger("click");
+
+            toggleCatcher(false);
             entryRename(view, entry, false, function (success, oldVal, newVal) {
                 if (success) {
                     showSpinner(view);
@@ -1733,13 +1671,14 @@
         // Copy/cut a file/folder
         $("#entry-menu .copy, #entry-menu .cut").register("click", function (event) {
             var entry = $("#entry-menu").data("target");
+
+            toggleCatcher(false);
             droppy.clipboard = { type: $(this).attr("class"), from: entry.data("id") };
-            $("#click-catcher").trigger("click");
             $(".view").each(function () {
                 var view = $(this);
                 if (!view.children(".paste-button").length) {
                     view.append(
-                        '<div class="paste-button ' + (droppy.clipboard ? "in" : "out") + '">' + droppy.svg.paste +
+                        '<div class="paste-button ' + (droppy.clipboard && "in") + '">' + droppy.svg.paste +
                             '<span>Paste <span class="filename">' +
                                 (droppy.clipboard ? basename(droppy.clipboard.from) : "") +
                             '</span></span>' +
@@ -1759,10 +1698,10 @@
                         throw new Error("Clipboard was empty!");
                     }
                     droppy.clipboard = null;
-                    $("#click-catcher").trigger("click");
-                    $(".paste-button").replaceClass("in", "out");
+                    toggleCatcher(false);
+                    $(".paste-button").removeClass("in");
                 });
-                $(".paste-button").setTransitionClass("out", "in");
+                $(".paste-button").setTransitionClass("in");
             });
             event.stopPropagation();
         });
@@ -1771,36 +1710,37 @@
         $("#entry-menu .delete").register("click", function (event) {
             event.stopPropagation();
             if (droppy.socketWait) return;
+
+            toggleCatcher(false);
             var entry = $("#entry-menu").data("target");
             showSpinner(entry.parents(".view"));
             sendMessage(null, "DELETE_FILE", entry.data("id"));
-            $("#click-catcher").trigger("click");
         });
     }
 
-    function showEntryMenu(entry, x) {
-        var menuTop, menuMaxTop,
-            type = /sprite\-(\w+)/.exec(entry.find(".sprite").attr("class"))[1],
-            button = entry.find(".entry-menu"),
-            menu = $("#entry-menu"),
-            emWidth = parseFloat($("#entry-menu").css("font-size")); // width of 1em
+    function showEntryMenu(entry, x, y) {
+        var left, top, maxTop,
+            type    = /sprite\-(\w+)/.exec(entry.find(".sprite").attr("class"))[1],
+            button  = entry.find(".entry-menu"),
+            menu    = $("#entry-menu");
 
-        menu.attr("class", "in").data("target", entry).addClass("type-" + type);
-        if (x)
-            menu.css("left", (x + emWidth - menu.width()) + "px");
-        else
-            menu.css("left", (button.offset().left + button.width() - menu.width()) + "px");
+        left   = x ? (x - menu.width() / 2) : (button.offset().left + button.width() - menu.width());
+        top    = entry.offset().top;
+        maxTop = $(document).height() - menu.height();
 
-        menuMaxTop = $(document).height() - $("#entry-menu").height();
-        menuTop = entry.offset().top;
-        if (menuTop > menuMaxTop) menuTop = menuMaxTop;
-        menu.css("top", menuTop + "px");
-        toggleCatcher();
+        toggleCatcher(true);
+        menu.css({
+            left: (left > 0 ? left : 0) + "px",
+            top: (top > maxTop ? maxTop : top) + "px"
+        }).data("target", entry).attr("class", "type-" + type + " in");
 
-        $("#click-catcher").one("click", function () {
-            menu.attr("class", "out");
-            toggleCatcher();
-        });
+        if (x && y) {
+            var target = document.elementFromPoint(x, y);
+            target = target.nodeName === "a" ? $(target) : $(target).parents("a");
+            target.addClass("active").one("mouseleave", function () {
+                $(this).removeClass("active");
+            });
+        }
     }
 
     function sortByHeader(view, header) {
@@ -1874,7 +1814,7 @@
                 dataType: "text"
             }).done(function (data, textStatus, request) {
                 if (request.status !== 200) {
-                    showError(view, "Couldn't open/read the file.");
+                    showError(view, "Couldn't open or read the file.");
                     hideSpinner(view);
                 } else if (data === "text") { // Non-Binary content
                     view[0].currentFile = file;
@@ -1944,22 +1884,23 @@
 
         // Show arrows for three seconds so they won't have to be discovered
         arrows.addClass("in");
-        setTimeout(function () {arrows.removeClass("in"); }, 3000);
+        setTimeout(function () {arrows.removeClass("in"); }, 2000);
     }
 
     function swapMedia(view, dir) {
+        view.find(".media-wrapper")[0].style.willChange = "transform";
         var b, a = view.find(".media-wrapper"),
             nextFile = (dir === "left") ? getPrevMedia(view) : getNextMedia(view),
             isImage = Object.keys(droppy.imageTypes).indexOf(getExt(nextFile)) !== -1,
             src = getMediaSrc(view, nextFile);
 
         if (isImage) {
-            b = $("<div class='media-wrapper new-media " + dir + "'><img src='" + src + "'></div>");
+            b = $("<div class='media-wrapper new-media " + dir + "'><img class='media' src='" + src + "'></div>");
             b.find("img").one("load", function () {
                 aspectScale();
             });
         } else {
-            b = $("<div class='media-wrapper new-media " + dir + "'><video src='" + src + "' id='video-" + view[0].vId + "'></div>");
+            b = $("<div class='media-wrapper new-media " + dir + "'><video class='media' src='" + src + "' id='video-" + view[0].vId + "'></div>");
             b = $(bindVideoEvents(b[0]));
         }
 
@@ -1968,6 +1909,7 @@
         b.setTransitionClass(/(left|right)/, "").end(function () {
             b.removeClass("new-media");
             a.remove();
+            view.find(".media-wrapper")[0].style.willChange = "auto";
             if (!isImage) initVideoJS(b.find("video")[0]);
             makeMediaDraggable(b[0]);
             $(b[0]).parents(".content").replaceClass(/(image|video)/, isImage ? "image" : "video");
@@ -2066,7 +2008,7 @@
         showSpinner(view);
         var editor, doc = $(droppy.templates.views.document({modes: droppy.modes}));
         view.data("type", "document");
-        view[0].animDirection = "forward";
+        view[0].animDirection = "center";
 
         $.ajax({
             type: "GET",
@@ -2075,6 +2017,7 @@
         }).done(function (data) {
             var filename = basename(entryId);
             updateTitle(filename);
+            setEditorFontSize(droppy.get("editorFontSize"));
             loadTheme(droppy.get("theme"), function () {
                 loadCM(data, filename);
             });
@@ -2085,7 +2028,7 @@
         function loadCM(data, filename) {
             loadContent(view, contentWrap(view).append(doc), function () {
                 view[0].editorEntryId = entryId;
-                view[0].editor = editor = CodeMirror(doc.find(".text-editor")[0], {
+                view[0].editor = editor = CodeMirror(view.find(".document")[0], {
                     autofocus: true,
                     dragDrop: false,
                     indentUnit: droppy.get("indentUnit"),
@@ -2096,9 +2039,11 @@
                     showCursorWhenSelecting: true,
                     styleSelectedText: true,
                     styleActiveLine: true,
+                    tabSize: droppy.get("indentUnit"),
                     theme: droppy.get("theme"),
                     mode: "text/plain"
                 });
+
                 doc.find(".exit").register("click", function () {
                     closeDoc($(this).parents(".view"));
                     editor = null;
@@ -2117,8 +2062,7 @@
                 });
                 doc.find(".syntax").register("click", function () {
                     var shown = view.find(".mode-select").toggleClass("in").hasClass("in");
-                    var action = shown ? "addClass" : "removeClass";
-                    view.find(".syntax")[action]("in");
+                    view.find(".syntax")[shown ? "addClass" : "removeClass"]("in");
                     view.find(".mode-select").on("change", function () {
                         var mode = $(this).val();
                         CodeMirror.autoLoadMode(editor, mode);
@@ -2184,7 +2128,7 @@
     function createUserList(users) {
         var output = "<div class='list-user'>";
         Object.keys(users).forEach(function (user) {
-            output += '<li><span class="username">' + user + "</span>" + droppy.svg.remove + '</li>';
+            output += '<li><span class="username">' + user + "</span>" + droppy.svg.trash + '</li>';
         });
         output += "</ul>";
         output += "<div class='add-user'>" + droppy.svg.plus + "Add User</div>";
@@ -2209,7 +2153,7 @@
                     priv: true
                 });
             });
-            list.find(".remove").register("click", function (event) {
+            list.find(".trash").register("click", function (event) {
                 event.stopPropagation();
                 sendMessage(null, "UPDATE_USER", {
                     name: $(this).parents("li").children(".username").text(),
@@ -2221,13 +2165,17 @@
 
     function showPrefs() {
         var box = $("#prefs-box");
+        box[0].style.willChange = "transform, opacity, visibility";
         box.empty().append(function () {
+            var fontSizes    = [10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30];
+            var indentWidths = [1, 2, 4, 8];
             return $("<div class='list-prefs'>").append(droppy.templates.options({
                 droppy: droppy,
                 prefs: [
-                    ["indentWithTabs", "Indentation Mode", [true, false], ["Tabs", "Spaces"]],
-                    ["indentUnit", "Indentation Unit", [2, 4, 8], [2, 4, 8]],
                     ["theme", "Editor Theme", droppy.themes, droppy.themes],
+                    ["editorFontSize", "Editor Font Size", fontSizes, fontSizes],
+                    ["indentWithTabs", "Indentation", [true, false], ["Tabs", "Spaces"]],
+                    ["indentUnit", "Indentation Width", indentWidths, indentWidths],
                     ["lineWrapping", "Wordwrap Mode", [true, false], ["Wrap", "No Wrap"]],
                     ["renameExistingOnUpload", "Upload Mode", [true, false], ["Rename", "Replace"]]
                 ]
@@ -2236,14 +2184,23 @@
 
         $("select.theme").register("change", function () {
             var theme = $(this).val();
-            loadTheme(theme);
-            $(".view").each(function () {
-                if (this.editor) this.editor.setOption("theme", theme);
+            loadTheme(theme, function () {
+                droppy.set("theme", theme);
+                $(".view").each(function () {
+                    if (this.editor) this.editor.setOption("theme", theme);
+                });
             });
         });
 
-        $("#prefs-box").replaceClass("out", "in");
-        toggleCatcher();
+        $("select.editorFontSize").register("change", function () {
+            setEditorFontSize($(this).val());
+        });
+
+        box.addClass("in").end(function () {
+            this.style.willChange = "auto";
+        });
+
+        toggleCatcher(true);
         $("#click-catcher").one("click", function () {
             box.find("select").each(function () {
                 var option = $(this).attr("class"),
@@ -2254,9 +2211,13 @@
                 else if (/^-?\d*(\.\d+)?$/.test(value)) value = parseFloat(value);
 
                 droppy.set(option, value);
+                if (option === "indentUnit") droppy.set("tabSize", value);
 
                 $(".view").each(function () {
-                    if (this.editor) this.editor.setOption(option, value);
+                    if (this.editor) {
+                        this.editor.setOption(option, value);
+                        if (option === "indentUnit") this.editor.setOption("tabSize", value);
+                    }
                 });
             });
         });
@@ -2311,7 +2272,7 @@
             title      = basename(player.src).replace(/\..+$/, "").replace(/_/g, " ").replace(/\s+/, " ");
 
         title = decodeURIComponent(title);
-        view.find(".audio-bar").replaceClass("out", "in");
+        view.find(".audio-bar").addClass("in");
         view.find(".audio-title").text(title);
         updateTitle(title);
 
@@ -2404,7 +2365,7 @@
                 view[0].audioUpdater = null;
             }
             updateTitle(basename(getView()[0].currentFolder));
-            bar.replaceClass("in", "out");
+            bar.removeClass("in");
             event.stopPropagation();
         });
         bar.find(".shuffle").register("click", function (event) {
@@ -2424,7 +2385,7 @@
         volumeIcon[0].addEventListener("mousewheel", onWheel);
         volumeIcon[0].addEventListener("DOMMouseScroll", onWheel);
         volumeIcon.register("click", function (event) {
-            slider.replaceClass(/in|out/, slider.hasClass("in") ? "out" : "in");
+            slider.toggleClass("in");
             volumeIcon.toggleClass("active");
             event.stopPropagation();
         });
@@ -2519,12 +2480,13 @@
     // draggabilly
     function makeMediaDraggable(el) {
         if ($(el).hasClass("draggable")) return;
-        var draggie = new Draggabilly(el, {axis: "x"});
-        $(el).attr("class", "media-wrapper draggable");
-        draggie.on("dragEnd", function (instance) {
-            var view = $(instance.element).parents(".view"),
-                dragThreshold = droppy.detects.mobile ? 0.15 : 0.075;
-            if ((Math.abs(instance.position.x) / instance.element.clientWidth) > dragThreshold) {
+        $(el).attr("class", "media-wrapper draggable").draggabilly({axis: "x"});
+        $(el).on("dragEnd", function () {
+            var instance  = $(this).data("draggabilly"),
+                view      = $(instance.element).parents(".view"),
+                threshold = droppy.detects.mobile ? 0.15 : 0.075;
+
+            if ((Math.abs(instance.position.x) / instance.element.clientWidth) > threshold) {
                 swapMedia(view, instance.position.x > 0 ? "left" : "right");
             } else {
                 $(instance.element).removeAttr("style");
@@ -2693,23 +2655,6 @@
         };
     }
 
-    // SVG preprocessing
-    function prepareSVG(html) {
-        var tmp;
-        // Populate droppy.svg
-        Object.keys(droppy.svg).forEach(function (name) {
-            tmp = $("<div>" + droppy.svg[name] + "</div>");
-            tmp.find("svg").attr("class", name);
-            droppy.svg[name] = tmp.html();
-        });
-        // Replace <svg>'s in the html source with the full svg data
-        tmp = $("<div>" + html + "</div>");
-        tmp.find("svg").replaceWith(function () {
-            return $(droppy.svg[$(this).attr("class")]);
-        });
-        return tmp.html();
-    }
-
     // Find the corrects class for an icon sprite
     function getSpriteClass(extension) {
         for (var type in droppy.iconMap) {
@@ -2841,22 +2786,35 @@
         }
     }
 
-    function loadTheme(theme, callback) {
-        $.get("?!/theme/" + theme).then(function (data) {
-            if (!$("#cmTheme").length) $('<style id="cmTheme"></style>').appendTo("head");
-            $("#cmTheme").text(data);
-            droppy.set("theme", theme);
-            if (callback) callback();
+    function loadTheme(theme, cb) {
+        var className = theme.replace(/[^a-z]/gim, "");
+        if (!$("." + className).length) {
+            $.get("?!/theme/" + theme).then(function (data) {
+                $('<style class="' + className + '">' + data + '</style>').appendTo("head");
+                cb();
+            });
+        } else cb();
+    }
+
+    function setEditorFontSize(size) {
+        [].slice.call(document.styleSheets).some(function (sheet) {
+            if (sheet.ownerNode.id === "css") {
+                [].slice.call(sheet.cssRules).some(function (rule) {
+                    if (rule.selectorText === ".CodeMirror" && /font-size/.test(rule.cssText)) {
+                        rule.style.fontSize =  size + "px";
+                        return true;
+                    }
+                });
+                return true;
+            }
         });
     }
 
     function showSpinner(view) {
-        var spinner;
         if (!view.find(".spinner").length)
-            view.find(".path").append('<div class="spinner"></div>');
+            view.find(".path").append(droppy.svg.spinner);
 
-        spinner = view.find(".spinner");
-        if (spinner.hasClass("out")) spinner.removeClass("out");
+        view.find(".spinner").attr("class", "spinner in");
 
         // HACK: Safeguard so a view won't get stuck in loading state
         if (view.data("type") === "directory") {
@@ -2869,8 +2827,7 @@
 
     function hideSpinner(view) {
         var spinner = view.find(".spinner");
-        if (spinner.length && !spinner.hasClass("out"))
-            spinner.addClass("out");
+        if (spinner.length) spinner.attr("class", "spinner");
         if (view[0].stuckTimeout) clearTimeout(view[0].stuckTimeout);
     }
 
@@ -2880,22 +2837,26 @@
         box.children("span").text(text);
         box.attr("class", "info-box error in");
         setTimeout(function () {
-            box.replaceClass("in", "out");
+            box.removeClass("in");
         }, 3000);
     }
 
-    function showLinkBox(view, link) {
-        var box   = view.find(".info-box"),
-            input = box.find("input");
+    function showLink(view, link) {
+        var box = view.find(".info-box"), out = box.find(".linkout");
         box.find("svg").replaceWith(droppy.svg.link);
-        input
-            .val(window.location.protocol + "//" + window.location.host + window.location.pathname + "?$/" +  link)
-            .register("keydown", function (event) {
-                if (event.keyCode === 27 || event.keyCode === 13)
-                    $("#click-catcher").click();
+        out
+            .text(window.location.protocol + "//" + window.location.host + window.location.pathname + "?$/" + link)
+            .register("copy", function () {
+                setTimeout(function () {
+                  toggleCatcher(false);
+                }, 0);
             });
         box.attr("class", "info-box link in").end(function () {
-            input[0].select();
+            var range = document.createRange(), selection = window.getSelection();
+            range.selectNodeContents(out[0]);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            out[0].focus();
         });
     }
 
@@ -2921,18 +2882,18 @@
         }
     }
 
-    function throttle(func, threshhold) {
-        if (!threshhold) threshhold = 250;
+    function throttle(func, threshold) {
+        if (!threshold) threshold = 250;
         var last, deferTimer;
         return function () {
             var now = Date.now(),
                 args = arguments;
-            if (last && now < last + threshhold) {
+            if (last && now < last + threshold) {
                 clearTimeout(deferTimer);
                 deferTimer = setTimeout(function () {
                     last = now;
                     func.apply(this, args);
-                }, threshhold);
+                }, threshold);
             } else {
                 last = now;
                 func.apply(this, args);
