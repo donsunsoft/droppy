@@ -915,7 +915,7 @@
         link = entry.find(".entry-link");
 
         // Add inline elements
-        namer = $('<input class="inline-namer" value="' + link.text() + '" placeholder="' + link.text() + '">');
+        namer = $('<input type="text" class="inline-namer" value="' + link.text() + '" placeholder="' + link.text() + '">');
         link.after(namer);
         entry.addClass("editing");
 
@@ -973,18 +973,16 @@
 
     function toggleCatcher(show) {
         var cc     = $("#click-catcher"),
-            modals = ["#prefs-box", "#about-box", "#entry-menu", "#drop-select", ".info-box"],
-            toBlur = ["#navigation", ".path", ".content-container", ".audio-bar"];
+            modals = ["#prefs-box", "#about-box", "#entry-menu", "#drop-select", ".info-box"];
 
         if (show === undefined)
             show = modals.some(function (selector) { return $(selector).hasClass("in"); });
 
-        toBlur.forEach(function (selector) {
-            $(selector)[show ? "addClass" : "removeClass"]("blur");
-        });
-
-        if (!show)
+        if (!show) {
             modals.forEach(function (selector) { $(selector)[show ? "addClass" : "removeClass"]("in"); });
+            $(".data-row.active").removeClass("active");
+        }
+
 
         cc.register("click", toggleCatcher.bind(null, false));
         cc[show ? "addClass" : "removeClass"]("in");
@@ -1722,15 +1720,18 @@
             button  = entry.find(".entry-menu"),
             menu    = $("#entry-menu");
 
+        menu.attr("class", "type-" + type);
+
         left   = x ? (x - menu.width() / 2) : (button.offset().left + button.width() - menu.width());
         top    = entry.offset().top;
-        maxTop = $(document).height() - menu.height();
+        maxTop = $(document).height() - menu.height() - entry.height();
 
+        entry.addClass("active");
         toggleCatcher(true);
         menu.css({
             left: (left > 0 ? left : 0) + "px",
             top: (top > maxTop ? maxTop : top) + "px"
-        }).data("target", entry).attr("class", "type-" + type + " in");
+        }).data("target", entry).addClass("in");
 
         if (x && y) {
             var target = document.elementFromPoint(x, y);
@@ -1909,7 +1910,7 @@
             a.remove();
             view.find(".media-wrapper")[0].style.willChange = "auto";
             if (!isImage) initVideoJS(b.find("video")[0]);
-            makeMediaDraggable(b[0]);
+            makeMediaDraggable(b[0], !isImage);
             $(b[0]).parents(".content").replaceClass(/(image|video)/, isImage ? "image" : "video");
             view[0].currentFile = nextFile;
             populateMediaCache(view, view[0].currentData);
@@ -1988,11 +1989,11 @@
             });
             view.find(".media-container img").each(function () {
                 aspectScale();
-                makeMediaDraggable(this.parentNode);
+                makeMediaDraggable(this.parentNode, false);
             });
             view.find(".media-container video").each(function () {
                 initVideoJS(this, function () {
-                    makeMediaDraggable(view.find(".media-wrapper")[0]);
+                    makeMediaDraggable(view.find(".media-wrapper")[0], true);
                     bindVideoEvents(view.find("video")[0]);
                 });
             });
@@ -2194,31 +2195,32 @@
             setEditorFontSize($(this).val());
         });
 
-        box.addClass("in").end(function () {
-            this.style.willChange = "auto";
-        });
+        setTimeout(function () {
+            box.addClass("in").end(function () {
+                $(this).removeAttr("style");
+            });
+            toggleCatcher(true);
+            $("#click-catcher").one("click", function () {
+                box.find("select").each(function () {
+                    var option = $(this).attr("class"),
+                        value  = $(this).val();
 
-        toggleCatcher(true);
-        $("#click-catcher").one("click", function () {
-            box.find("select").each(function () {
-                var option = $(this).attr("class"),
-                    value  = $(this).val();
+                    if (value === "true") value = true;
+                    else if (value === "false") value = false;
+                    else if (/^-?\d*(\.\d+)?$/.test(value)) value = parseFloat(value);
 
-                if (value === "true") value = true;
-                else if (value === "false") value = false;
-                else if (/^-?\d*(\.\d+)?$/.test(value)) value = parseFloat(value);
+                    droppy.set(option, value);
+                    if (option === "indentUnit") droppy.set("tabSize", value);
 
-                droppy.set(option, value);
-                if (option === "indentUnit") droppy.set("tabSize", value);
-
-                $(".view").each(function () {
-                    if (this.editor) {
-                        this.editor.setOption(option, value);
-                        if (option === "indentUnit") this.editor.setOption("tabSize", value);
-                    }
+                    $(".view").each(function () {
+                        if (this.editor) {
+                            this.editor.setOption(option, value);
+                            if (option === "indentUnit") this.editor.setOption("tabSize", value);
+                        }
+                    });
                 });
             });
-        });
+        },0)
     }
 
     // ============================================================================
@@ -2476,9 +2478,10 @@
     }
 
     // draggabilly
-    function makeMediaDraggable(el) {
+    function makeMediaDraggable(el, isVideo) {
         if ($(el).hasClass("draggable")) return;
-        $(el).attr("class", "media-wrapper draggable").draggabilly({axis: "x"});
+        var opts = isVideo ? {axis: "x", handle: "video"} : {axis: "x"};
+        $(el).attr("class", "media-wrapper draggable").draggabilly(opts);
         $(el).on("dragEnd", function () {
             var instance  = $(this).data("draggabilly"),
                 view      = $(instance.element).parents(".view"),
